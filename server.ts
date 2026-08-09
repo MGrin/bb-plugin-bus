@@ -165,19 +165,25 @@ export default async function plugin(bb: BbPluginApi) {
               : db.prepare(`SELECT room, thread_id FROM members ORDER BY room`).all()
           ) as { room: string; thread_id: string }[];
           if (!rows.length) return { exitCode: 0, stdout: "no members" };
-          const lines: string[] = [];
-          for (const r of rows) {
-            let status = "gone";
-            let title = "";
-            try {
-              const t = await bb.sdk.threads.get({ threadId: r.thread_id });
-              status = String(t.status ?? "?");
-              title = t.title ?? "";
-            } catch {
-              /* archived/deleted between rows */
-            }
-            lines.push(`[${r.room}] ${r.thread_id}  status=${status}  ${title}`);
-          }
+          // One lookup per DISTINCT thread, fetched concurrently — a thread in
+          // five rooms used to cost five sequential round-trips.
+          const ids = [...new Set(rows.map((r) => r.thread_id))];
+          const info = new Map(
+            await Promise.all(
+              ids.map(async (id): Promise<[string, { status: string; title: string }]> => {
+                try {
+                  const t = await bb.sdk.threads.get({ threadId: id });
+                  return [id, { status: String(t.status ?? "?"), title: t.title ?? "" }];
+                } catch {
+                  return [id, { status: "gone", title: "" }];
+                }
+              }),
+            ),
+          );
+          const lines = rows.map((r) => {
+            const t = info.get(r.thread_id)!;
+            return `[${r.room}] ${r.thread_id}  status=${t.status}  ${t.title}`;
+          });
           return { exitCode: 0, stdout: lines.join("\n") };
         }
         case "send": {
@@ -238,13 +244,24 @@ export default async function plugin(bb: BbPluginApi) {
                  ORDER BY seq LIMIT 50`,
               )
               .all(room, cur.last_seq, me) as BusMessage[];
-            const max = db
-              .prepare(`SELECT COALESCE(MAX(seq),0) AS s FROM messages WHERE room = ?`)
-              .get(room) as { s: number };
-            db.prepare(
-              `INSERT OR REPLACE INTO cursors (room, thread_id, last_seq) VALUES (?, ?, ?)`,
-            ).run(room, me, max.s);
+            // Advance ONLY to the last message actually returned. Jumping to
+            // MAX(seq) silently destroyed everything past the LIMIT: with >50
+            // unread, messages 51+ were skipped forever and could never be
+            // recovered by another recv.
+            if (msgs.length) {
+              db.prepare(
+                `INSERT OR REPLACE INTO cursors (room, thread_id, last_seq) VALUES (?, ?, ?)`,
+              ).run(room, me, msgs[msgs.length - 1]!.seq);
+            }
             out.push(...msgs.map(fmt));
+            const remaining = (
+              db
+                .prepare(
+                  `SELECT COUNT(*) AS n FROM messages WHERE room = ? AND seq > ? AND sender_thread != ?`,
+                )
+                .get(room, msgs.length ? msgs[msgs.length - 1]!.seq : cur.last_seq, me) as { n: number }
+            ).n;
+            if (remaining > 0) out.push(`… ${remaining} more in ${room} — run recv again`);
           }
           return { exitCode: 0, stdout: out.length ? out.join("\n") : "no new messages" };
         }
