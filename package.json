@@ -1,0 +1,29 @@
+{
+  "name": "bb-plugin-bus",
+  "version": "0.1.0",
+  "type": "module",
+  "engines": {
+    "bb": ">=0.36",
+    "bbPluginSdk": "^0.4.1"
+  },
+  "bb": {
+    "name": "Bus",
+    "description": "Peer session bus between bb threads: rooms, presence, ambient messages, and addressed sends that wake the recipient.",
+    "branding": {
+      "icon": "Radio"
+    },
+    "server": "./server.ts",
+    "skills": [
+      "skills"
+    ]
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.12",
+    "@types/node": "^22.0.0",
+    "@types/react": "^19.0.0",
+    "better-sqlite3": "^12.0.0",
+    "hono": "^4.11.9",
+    "typescript": "^5.7.0",
+    "zod": "^4.3.6"
+  }
+}
