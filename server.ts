@@ -9,15 +9,9 @@
 //   of every room automatically.
 // - A room send without --to is ambient: stored for recv/log, wakes nobody.
 import type { BbPluginApi } from "@bb/plugin-sdk";
-
-interface BusMessage {
-  seq: number;
-  room: string;
-  sender_thread: string;
-  to_thread: string | null;
-  text: string;
-  created_ts: string;
-}
+// Argument parsing, recipient resolution and message formatting live in lib.ts
+// so `node --test` can exercise them without bb, sqlite or a network.
+import { type BusMessage, fmt, parseSend, resolveRecipients } from "./lib.ts";
 
 export default async function plugin(bb: BbPluginApi) {
   const db = bb.storage.database();
@@ -55,11 +49,6 @@ export default async function plugin(bb: BbPluginApi) {
   };
   bb.events.on("thread.archived", ({ thread }) => dropThread(thread.id));
   bb.events.on("thread.deleted", ({ thread }) => dropThread(thread.id));
-
-  const fmt = (m: BusMessage) =>
-    `#${m.seq} [${m.room}] ${m.created_ts} ${m.sender_thread}` +
-    (m.to_thread ? ` -> ${m.to_thread}` : "") +
-    `: ${m.text}`;
 
   async function wake(
     recipient: string,
@@ -187,17 +176,11 @@ export default async function plugin(bb: BbPluginApi) {
           return { exitCode: 0, stdout: lines.join("\n") };
         }
         case "send": {
-          const room = argv[1];
-          if (!room)
-            return fail('usage: bb bus send <room> [--to <thread-id>|--to all] <text...>');
-          let to: string | null = null;
-          const rest: string[] = [];
-          for (let i = 2; i < argv.length; i++) {
-            if (argv[i] === "--to") to = argv[++i] ?? null;
-            else rest.push(argv[i]!);
-          }
-          const text = rest.join(" ").trim();
-          if (!text) return fail("bus: empty message body refused");
+          const parsed = parseSend(argv);
+          if (parsed.error) return fail(parsed.error);
+          const room = parsed.room!;
+          const to = parsed.to;
+          const text = parsed.text;
           if (!db.prepare(`SELECT 1 FROM rooms WHERE name = ?`).get(room)) {
             return fail(`bus: no such room '${room}' — bb bus join ${room} first`);
           }
@@ -205,14 +188,10 @@ export default async function plugin(bb: BbPluginApi) {
             `INSERT INTO messages (room, sender_thread, to_thread, text) VALUES (?, ?, ?, ?)`,
           ).run(room, me, to === "all" ? "@all" : to, text);
           if (!to) return { exitCode: 0, stdout: `sent (ambient) -> ${room}` };
-          const recipients =
-            to === "all"
-              ? (
-                  db
-                    .prepare(`SELECT thread_id FROM members WHERE room = ? AND thread_id != ?`)
-                    .all(room, me) as { thread_id: string }[]
-                ).map((r) => r.thread_id)
-              : [to];
+          const members = (
+            db.prepare(`SELECT thread_id FROM members WHERE room = ?`).all(room) as { thread_id: string }[]
+          ).map((r) => r.thread_id);
+          const recipients = resolveRecipients(to, members, me!);
           const errors: string[] = [];
           for (const r of recipients) {
             const err = await wake(r, room, me!, text);

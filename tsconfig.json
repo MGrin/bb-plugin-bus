@@ -21,10 +21,13 @@
       ]
     },
     "noEmit": true,
-    "skipLibCheck": false
+    "skipLibCheck": false,
+    "allowImportingTsExtensions": true
   },
   "include": [
     "server.ts",
+    "lib.ts",
+    "lib.test.ts",
     "types"
   ]
 }
