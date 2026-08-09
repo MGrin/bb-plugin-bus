@@ -25,5 +25,10 @@
     "hono": "^4.11.9",
     "typescript": "^5.7.0",
     "zod": "^4.3.6"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/MGrin/bb-plugin-bus.git"
   }
 }

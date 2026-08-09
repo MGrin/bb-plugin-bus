@@ -1,65 +1,51 @@
 # bb-plugin-bus
 
-A BB plugin.
+A peer message bus between [bb](https://getbb.app) threads.
 
-## Manifest
+Threads talk to each other in rooms. A message addressed to a thread is **delivered as a
+real turn** by the bb server — so the recipient acts on it whether it was idle or busy.
+There is no listener process to keep alive and nothing to poll, which means a session
+can't silently go deaf.
 
-`package.json` is the plugin manifest. Notable fields:
-
-- `bb.server` — backend entry (required); optional `bb.app` for a frontend.
-- `bb.name` and `bb.description` — required human-facing identity.
-- `bb.branding` — required; declare `icon` as a BB icon name or a
-  plugin-relative compact SVG, or declare `logo.light` (with optional
-  `logo.dark`). Logo assets must be relative `.svg`, `.png`, or
-  `.webp` files.
-- `engines.bb` — supported bb app version range.
-- `engines.bbPluginSdk` — supported plugin SDK range (scaffold: `^0.4.1`).
-
-Run `bb plugin build` before publishing git/npm installs. It writes
-`dist/server.js` + `server.meta.json` (and, with `bb.app`, `app.js` /
-`app.css` / `app.meta.json`). Each `*.meta.json` stamps SDK major/version,
-`artifactFormatVersion`, `pluginId`, `pluginVersion`, and
-`builtWith` so managed installs can verify the artifacts.
-
-## Install
-
-From this directory:
-
-```
-bb plugin install .
+```sh
+bb plugin install git:https://github.com/MGrin/bb-plugin-bus.git@main
 ```
 
-After editing sources, reload:
+## Usage
 
-```
-bb plugin reload bus
-```
-
-## Configure
-
-```
-bb plugin config bus
-bb plugin config bus set greeting hi
-```
-
-## Types & API reference
-
-`types/bb-plugin-sdk.d.ts` (and `types/bb-plugin-sdk-app.d.ts` for the
-frontend) are the full, bundled BB plugin API — `tsconfig.json` maps
-`@bb/plugin-sdk` to them, so your editor and `tsc` see real types with no extra
-install. They are readable declarations: open them for an exact signature.
-
-The SDK surface grows with every BB release, and these are a copy. Refresh
-them from the BB you are running:
-
-```
-bb plugin types          # rewrite types/ from this BB
-bb plugin types --check  # CI: fail when they are out of date
+```sh
+bb bus join <room>                              # join (creates if needed)
+bb bus send <room> <text...>                    # ambient: stored, wakes nobody
+bb bus send <room> --to <thread-id> <text...>   # delivers a turn to that thread
+bb bus send <room> --to all <text...>           # delivers to every member
+bb bus recv [<room>]                            # read unread, advances your cursor
+bb bus who [<room>]                             # members with live thread status
+bb bus rooms · bb bus log <room> [-n N] · bb bus leave <room>
 ```
 
-`bb plugin build` and `bb plugin dev` refresh them for you. Ask BB to write
-plugins for you: the `bb-plugin-authoring` skill documents the whole surface
-with examples.
+Your identity is your bb thread id — there are no separate handles to mint or remember.
 
-Confused by the API, or need something the types don't explain? Clone the BB
-repo and read the source: <https://github.com/get-bb/bb>.
+## Design
+
+- **Ambient vs addressed.** Most coordination is status that peers should see *eventually*;
+  that's an ambient send, and it costs the recipient nothing. Reserve `--to` for messages
+  that should change what someone does now — a delivered turn is not free.
+- **Delivery is the server's job.** Addressed sends go through the bb SDK
+  (`threads.send`, mode `auto`), which queues on an idle thread and steers a running one.
+  Nothing in the plugin waits, blocks or polls.
+- **Membership follows thread lifecycle.** Archiving or deleting a thread drops it from
+  every room automatically, so `who` never lists ghosts.
+- **Cursors don't lose messages.** `recv` returns a bounded page and advances your cursor
+  only to what it actually handed you, then tells you how many remain.
+
+The plugin ships a skill teaching agents this protocol, so threads pick it up without
+being told.
+
+## Storage
+
+One SQLite database in the plugin's own data directory: rooms, members, messages, and a
+per-thread cursor per room. No daemon, no network, no runtime dependencies.
+
+## License
+
+MIT
