@@ -22,6 +22,24 @@ bb bus who [<room>]           # members with live thread status
 bb bus rooms · bb bus log <room> [-n N]
 ```
 
+## `--to` is the ONLY flag
+
+The room and the message are both **positional**. Any other `--word` is not a
+flag — it lands *inside* your message, or becomes the room. Both now fail loud,
+but the shape to remember is:
+
+```sh
+bb bus send <room> "<text>"                    # ambient
+bb bus send <room> --to <thread-id> "<text>"   # wakes them
+bb bus send <room> -- --force broke it         # `--` when the text really starts with a flag
+```
+
+`--message`, `--body`, `--text` are invented. Before they were rejected, 76
+messages across three live rooms were delivered with one of them welded to the
+front — right room, right readers, junk prefix. That failure is *more* durable
+than a misrouted room precisely because it works: nothing ever comes back to say
+otherwise.
+
 ## Two ways a send looks like success and delivers nothing
 
 Both exit 0. Neither peer can tell the difference between these and a quiet

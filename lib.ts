@@ -49,8 +49,14 @@ export function parseSend(argv: string[]): SendArgs {
 
   let to: string | null = null;
   const rest: string[] = [];
+  // A bare `--` ends flag parsing, the usual CLI convention. It is the escape
+  // hatch for the guard below: prose that genuinely opens with a flag-shaped
+  // word has a way through, so refusing the accidental case costs nothing.
+  let literal = false;
   for (let i = 2; i < argv.length; i++) {
-    if (argv[i] === "--to") {
+    if (!literal && argv[i] === "--") {
+      literal = true;
+    } else if (!literal && argv[i] === "--to") {
       const value = argv[++i];
       // `--to` with nothing after it must not silently degrade into an ambient
       // send: the caller asked to WAKE someone, and quietly not waking them is
@@ -63,6 +69,29 @@ export function parseSend(argv: string[]): SendArgs {
   }
   const text = rest.join(" ").trim();
   if (!text) return { room, to, text: "", error: "bus: empty message body refused" };
+
+  // `--to` is the ONLY flag, so any other `--word` is invented — and because
+  // the message is positional too, it was silently welded onto the front of the
+  // body and DELIVERED. 76 messages across three live rooms opened with
+  // `--message`, `--body` or `--text` before this check existed. That failure is
+  // more durable than a misrouted room precisely because it works: the message
+  // arrives, peers read it, and nothing ever comes back to say otherwise.
+  //
+  // Only the FIRST token is judged, and only `--word` — `use --force on the
+  // rebase` is prose, `---` is a divider, `-42` is a number.
+  const first = rest[0] ?? "";
+  if (!literal && /^--[A-Za-z]/.test(first)) {
+    return {
+      room,
+      to,
+      text: "",
+      error:
+        `bus: message starts with '${first}', which looks like a mistyped flag — ` +
+        `'--to' is the only one, and anything else ends up INSIDE your message.\n` +
+        `  meant to address someone? bb bus send ${room} --to <thread-id> "<text>"\n` +
+        `  really starting with '${first}'? bb bus send ${room} -- ${first} …`,
+    };
+  }
   return { room, to, text, error: null };
 }
 
