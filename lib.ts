@@ -11,6 +11,26 @@ export interface SendArgs {
 }
 
 /**
+ * Every `bb bus` subcommand takes the room POSITIONALLY, so a mistyped flag in
+ * that slot became a room name: `bb bus join --room ops` created a room called
+ * `--room`, and every later `send --room ops` found it and posted there with
+ * exit 0. 966 messages from four unrelated projects accumulated in that room
+ * before a thread stumbled on it — a misrouted send is indistinguishable from
+ * a peer that simply went quiet, so nothing ever surfaced it.
+ *
+ * Returns an error string, or null when the name is usable. Only the LEADING
+ * dash is rejected: dashes inside a name (`vat-audit-2026`) are ordinary, and
+ * flag-shaped words in a message BODY stay prose.
+ */
+export function validateRoom(room: string): string | null {
+  if (!room.startsWith("-")) return null;
+  return (
+    `bus: '${room}' is not a room — the room is POSITIONAL.\n` +
+    `  write: bb bus <command> <room> [...]   (a room name may not start with '-')`
+  );
+}
+
+/**
  * Parse `bb bus send <room> [--to <id>|--to all] <text...>`.
  *
  * The flag can sit anywhere after the room, because that is how people type it,
@@ -21,6 +41,11 @@ export function parseSend(argv: string[]): SendArgs {
   const usage = "usage: bb bus send <room> [--to <thread-id>|--to all] <text...>";
   const room = argv[1] ?? null;
   if (!room) return { room: null, to: null, text: "", error: usage };
+  // Before anything else: a bogus room makes every later complaint (empty
+  // body, dangling --to) point at the wrong thing, and the caller retries into
+  // the same hole.
+  const badRoom = validateRoom(room);
+  if (badRoom) return { room: null, to: null, text: "", error: `${badRoom}\n${usage}` };
 
   let to: string | null = null;
   const rest: string[] = [];
