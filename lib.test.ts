@@ -63,6 +63,39 @@ test("missing room gives usage, not a crash", () => {
   assert.match(parseSend(["send"]).error ?? "", /usage: bb bus send/);
 });
 
+test("a body STARTING with a flag-shaped token is refused, not stored with the junk", () => {
+  // `bb bus send ops --message "hi"` stored the text "--message hi" and
+  // delivered it. Right room, right readers, stray flag welded on. 76 messages
+  // across three live rooms carried one of these before the guard existed.
+  for (const bad of ["--message", "--body", "--text"]) {
+    const a = parseSend(["send", "ops", bad, "the", "real", "text"]);
+    assert.match(a.error ?? "", /looks like a mistyped flag/);
+    assert.equal(a.text, "");
+  }
+});
+
+test("`--` ends flag parsing, so a body may legitimately start with a flag", () => {
+  const a = parseSend(["send", "ops", "--", "--force", "is", "what", "broke", "it"]);
+  assert.equal(a.error, null);
+  assert.equal(a.text, "--force is what broke it");
+  // ...and --to after `--` is body text, not a wake.
+  const b = parseSend(["send", "ops", "--", "pass", "--to", "review"]);
+  assert.equal(b.to, null);
+  assert.equal(b.text, "pass --to review");
+});
+
+test("a real --to before `--` still wakes, and `--` is not itself body text", () => {
+  const a = parseSend(["send", "ops", "--to", "thr_abc", "--", "--force", "landed"]);
+  assert.equal(a.to, "thr_abc");
+  assert.equal(a.text, "--force landed");
+});
+
+test("prose that merely looks dashy is not mistaken for a flag", () => {
+  // A markdown rule and a negative number are not mistyped flags.
+  assert.equal(parseSend(["send", "ops", "---", "divider"]).error, null);
+  assert.equal(parseSend(["send", "ops", "-42", "degrees"]).error, null);
+});
+
 test("flag-shaped words in the body stay in the body", () => {
   const a = parseSend(["send", "ops", "use", "--force", "on", "the", "rebase"]);
   assert.equal(a.text, "use --force on the rebase");

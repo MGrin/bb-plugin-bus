@@ -89,7 +89,7 @@ export default async function plugin(bb: BbPluginApi) {
         name: "send",
         summary:
           "Send to a room. Ambient by default; --to <thread-id> or --to all wakes recipients with a delivered turn",
-        usage: 'bb bus send <room> [--to <thread-id>|--to all] <text...>',
+        usage: 'bb bus send <room> [--to <thread-id>|--to all] [--] <text...>',
       },
       {
         name: "recv",
@@ -273,7 +273,8 @@ export default async function plugin(bb: BbPluginApi) {
             stdout: [
               "bb bus — peer session bus between bb threads",
               "  join <room> · leave <room> · rooms · who [<room>]",
-              '  send <room> [--to <thread-id>|--to all] <text...>   (no --to = ambient, wakes nobody)',
+              '  send <room> [--to <thread-id>|--to all] [--] <text...>   (no --to = ambient, wakes nobody)',
+              '     --to is the ONLY flag; room and message are positional. `--` = rest is literal text.',
               "  recv [<room>] · log <room> [-n N]",
             ].join("\n"),
           };
