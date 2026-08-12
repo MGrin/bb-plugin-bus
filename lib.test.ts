@@ -1,7 +1,32 @@
 // node --test --experimental-strip-types lib.test.ts
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { fmt, parseSend, resolveRecipients } from "./lib.ts";
+import { fmt, parseSend, resolveRecipients, validateRoom } from "./lib.ts";
+
+test("a room name starting with '-' is refused, whichever flag was mistyped", () => {
+  // `bb bus join --room ops` used to create a room literally called `--room`,
+  // and every later `send --room ops` found it and posted there, exit 0.
+  for (const bad of ["--room", "-r", "--to", "--channel"]) {
+    assert.match(validateRoom(bad) ?? "", /POSITIONAL/);
+  }
+  assert.equal(validateRoom("ops"), null);
+  assert.equal(validateRoom("vat-audit-2026"), null);
+  // Only the LEADING dash is the tell; dashes inside a name are ordinary.
+  assert.equal(validateRoom("a-b--c"), null);
+});
+
+test("send refuses --room instead of posting to a room called '--room'", () => {
+  const a = parseSend(["send", "--room", "ops", "deploy", "is", "green"]);
+  assert.match(a.error ?? "", /POSITIONAL/);
+  // And it must not report the mistyped flag as a usable room.
+  assert.equal(a.text, "");
+});
+
+test("the room check runs before the empty-body check", () => {
+  // Otherwise `bb bus send --room ops` (no body) blames the body and the
+  // caller retries with more text into the same bogus room.
+  assert.match(parseSend(["send", "--room"]).error ?? "", /POSITIONAL/);
+});
 
 test("ambient send: no --to means store quietly", () => {
   const a = parseSend(["send", "ops", "deploy", "is", "green"]);

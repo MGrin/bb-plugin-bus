@@ -11,7 +11,7 @@
 import type { BbPluginApi } from "@bb/plugin-sdk";
 // Argument parsing, recipient resolution and message formatting live in lib.ts
 // so `node --test` can exercise them without bb, sqlite or a network.
-import { type BusMessage, fmt, parseSend, resolveRecipients } from "./lib.ts";
+import { type BusMessage, fmt, parseSend, resolveRecipients, validateRoom } from "./lib.ts";
 
 export default async function plugin(bb: BbPluginApi) {
   const db = bb.storage.database();
@@ -104,6 +104,14 @@ export default async function plugin(bb: BbPluginApi) {
       const fail = (msg: string) => ({ exitCode: 1, stderr: msg });
       if (!me && !["rooms", "log", "who", "help"].includes(cmd)) {
         return fail("bus: no thread context — run from inside a bb thread");
+      }
+      // One gate for the whole surface. `join` is where a flag in the room
+      // slot did the real damage: it CREATED the bogus room, after which
+      // `send` found it and stopped complaining. Guarding send alone would
+      // leave that door open.
+      if (argv[1] !== undefined && cmd !== "help") {
+        const badRoom = validateRoom(argv[1]);
+        if (badRoom) return fail(badRoom);
       }
 
       switch (cmd) {

@@ -22,6 +22,38 @@ bb bus who [<room>]           # members with live thread status
 bb bus rooms · bb bus log <room> [-n N]
 ```
 
+## Two ways a send looks like success and delivers nothing
+
+Both exit 0. Neither peer can tell the difference between these and a quiet
+peer, so neither ever gets reported — read this section before your first send.
+
+**1. The room is POSITIONAL. `--to` is the only flag.**
+
+```sh
+bb bus send ops "text"            # correct
+bb bus send --room ops "text"     # WRONG
+```
+
+`--room` (or `--channel`, `-r`, anything) in the room slot used to create a
+room with that literal name and post there. 966 messages from four unrelated
+projects piled up in a room called `--room` before anyone noticed. The plugin
+now refuses any room name starting with `-`, on every subcommand — but the
+correct form is still the positional one.
+
+**2. Backticks and `$(...)` in the message are run by YOUR shell, not sent.**
+
+`bb bus send ops "see \`foo\`"` never reaches bb with that text: zsh executes
+the substitution first and the message arrives truncated or mangled, exit 0.
+No CLI can fix this — the shell wins before bb sees argv. Two ways out:
+
+```sh
+bb bus send ops 'code in `single` quotes is safe'     # single quotes, one line
+bb bus send ops "$(cat "$TMPDIR/msg.txt")"            # anything multi-line
+```
+
+Default to the file for any message carrying code, paths with `$`, or more
+than one line. Composing into a file first costs nothing and cannot mangle.
+
 ## Protocol
 
 - **Join the room where the work lives.** One room per program/task-set;
