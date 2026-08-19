@@ -241,10 +241,52 @@ export default async function plugin(bb: BbPluginApi) {
           db.prepare(
             `INSERT INTO messages (room, sender_thread, to_thread, text) VALUES (?, ?, ?, ?)`,
           ).run(room, me, to === "all" ? "@all" : to, text);
-          if (!to) return { exitCode: 0, stdout: `sent (ambient) -> ${room}` };
           const members = (
             db.prepare(`SELECT thread_id FROM members WHERE room = ?`).all(room) as { thread_id: string }[]
           ).map((r) => r.thread_id);
+          // AN AMBIENT SEND NOW SAYS WHO IT DID NOT WAKE (MX-148).
+          //
+          // `sent (ambient) -> room` is a true and completely uninterpretable receipt: it
+          // returns cleanly, the room's message count rises — which is the check AGENTS.md
+          // prescribes for the `--room` typo, and it passes here — and the message really
+          // is in the room. What it does not say is that nobody was woken, so an
+          // orchestrator that broadcast "the slot is FREE, take it" to three idle workers
+          // stalled its own queue with a free box and three ready PRs (2026-08-19).
+          //
+          // The count is knowable at send time and is the one fact that would have made it
+          // visible, so it is printed. IDLE is what matters rather than membership: an
+          // ACTIVE thread reaches the room on its own turn, an idle one never does.
+          //
+          // The status lookup is capped. This is the hot path of every ambient send, and
+          // this machine is regularly at load 50+ with bb dropping writes (MX-138/MX-146);
+          // a broadcast to a large room must not turn into a burst of API calls. Above the
+          // cap the honest answer is the membership count, which needs no calls at all.
+          if (!to) {
+            const others = members.filter((m) => m !== me);
+            if (others.length === 0) return { exitCode: 0, stdout: `sent (ambient) -> ${room} — no other members` };
+            const IDLE_PROBE_CAP = 8;
+            let detail = `${others.length} other member(s) NOT woken`;
+            if (others.length <= IDLE_PROBE_CAP) {
+              const states = await Promise.all(
+                others.map(async (id) => {
+                  try {
+                    return String((await bb.sdk.threads.get({ threadId: id })).status ?? "?");
+                  } catch {
+                    return "gone";
+                  }
+                }),
+              );
+              const idle = states.filter((x) => x === "idle").length;
+              detail = `${others.length} other member(s) NOT woken, ${idle} of them IDLE`;
+            }
+            return {
+              exitCode: 0,
+              stdout:
+                `sent (ambient) -> ${room} — stored for recv/log, woke NOBODY. ${detail}. ` +
+                `An idle thread will not see this until it looks; if the message contains an ` +
+                `INSTRUCTION, resend with --to <thread-id>.`,
+            };
+          }
           const recipients = resolveRecipients(to, members, me!);
           const errors: string[] = [];
           for (const r of recipients) {
