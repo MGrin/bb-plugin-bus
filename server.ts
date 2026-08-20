@@ -12,7 +12,16 @@ import type { BbPluginApi } from "@bb/plugin-sdk";
 // Argument parsing, recipient resolution and message formatting live in lib.ts
 // so `node --test` can exercise them without bb, sqlite or a network.
 import { execFileSync } from "node:child_process";
-import { type BusMessage, fmt, parseSend, resolveRecipients, validateRoom } from "./lib.ts";
+import {
+  type BusMessage,
+  PRIOR_CONTACT_SQL,
+  type PriorContact,
+  firstContactNotice,
+  fmt,
+  parseSend,
+  resolveRecipients,
+  validateRoom,
+} from "./lib.ts";
 
 /**
  * Which commit is this PROCESS running? (MX-139/MX-141)
@@ -105,6 +114,29 @@ export default async function plugin(bb: BbPluginApi) {
       return `${recipient}: ${e instanceof Error ? e.message : String(e)}`;
     }
   }
+
+  /**
+   * Has `threadId` ever been part of `room`'s conversation before message `seq`?
+   * (MX-213 — see firstContactNotice in lib.ts for why this signal and not another.)
+   *
+   * THREE-STATE, and the third one is the point. If the history cannot be read
+   * the answer is "unknown" and the caller stays SILENT — never a warning, and
+   * never a cheerful "prior" either. A warning that fires when the instrument is
+   * blind is unfalsifiable noise; a check that reports OK when blind is the
+   * `launchctl` failure this repo already documents. Neither is acceptable, so
+   * the blind state is named and carried.
+   */
+  const priorContact = (room: string, threadId: string, seq: number): PriorContact => {
+    try {
+      const row = db.prepare(PRIOR_CONTACT_SQL).get(room, seq, threadId, threadId) as
+        | { prior: number }
+        | undefined;
+      if (!row || typeof row.prior !== "number") return "unknown";
+      return row.prior ? "prior" : "none";
+    } catch {
+      return "unknown";
+    }
+  };
 
   bb.cli.register({
     name: "bus",
@@ -238,9 +270,9 @@ export default async function plugin(bb: BbPluginApi) {
           if (!db.prepare(`SELECT 1 FROM rooms WHERE name = ?`).get(room)) {
             return fail(`bus: no such room '${room}' — bb bus join ${room} first`);
           }
-          db.prepare(
-            `INSERT INTO messages (room, sender_thread, to_thread, text) VALUES (?, ?, ?, ?)`,
-          ).run(room, me, to === "all" ? "@all" : to, text);
+          const written = db
+            .prepare(`INSERT INTO messages (room, sender_thread, to_thread, text) VALUES (?, ?, ?, ?)`)
+            .run(room, me, to === "all" ? "@all" : to, text);
           const members = (
             db.prepare(`SELECT thread_id FROM members WHERE room = ?`).all(room) as { thread_id: string }[]
           ).map((r) => r.thread_id);
@@ -294,7 +326,19 @@ export default async function plugin(bb: BbPluginApi) {
             if (err) errors.push(err);
           }
           const okCount = recipients.length - errors.length;
-          const summary = `sent -> ${room}, woke ${okCount}/${recipients.length}`;
+          // A DIRECTED SEND TO A STRANGER NOW SAYS SO (MX-213). `woke 1/1` is true of a
+          // correct address and of a typo'd one alike — that is how #4828 reached a thread
+          // that has never joined anything, which answered politely, and the sender learned
+          // nothing. The notice rides on the SAME receipt because that is the one thing the
+          // sender is guaranteed to look at. It is never a refusal: the send already
+          // happened by this line, and first contact is how every new worker gets briefed.
+          const notice = firstContactNotice(
+            to,
+            room,
+            priorContact(room, to!, Number(written.lastInsertRowid)),
+          );
+          const summary =
+            `sent -> ${room}, woke ${okCount}/${recipients.length}` + (notice ? `\n${notice}` : "");
           return errors.length
             ? { exitCode: 1, stdout: summary, stderr: `wake failures:\n${errors.join("\n")}` }
             : { exitCode: 0, stdout: summary };
