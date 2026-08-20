@@ -119,3 +119,73 @@ export const fmt = (m: BusMessage): string =>
   `#${m.seq} [${m.room}] ${m.created_ts} ${m.sender_thread}` +
   (m.to_thread ? ` -> ${m.to_thread}` : "") +
   `: ${m.text}`;
+
+/**
+ * Has this thread ever been part of THIS room's conversation? (MX-213)
+ *
+ * `unknown` is a real answer, not a failure to produce one: if the history
+ * cannot be read the caller must stay silent. A warning that fires when blind
+ * is unfalsifiable, and an unfalsifiable warning is trained away exactly like a
+ * loud one — this machine already has three of those.
+ */
+export type PriorContact = "prior" | "none" | "unknown";
+
+/**
+ * Params: (room, seq, thread_id, thread_id), where `seq` is the row of the send
+ * being judged. The `seq <` bound is load-bearing TWICE. It stops the outgoing
+ * message counting as its own prior contact — without it nothing ever warns,
+ * silently — and by making that structural it removes the ordering hazard: this
+ * runs AFTER the insert and would be correct before it too, so a later edit that
+ * moves the call cannot quietly disable the check. It is also, verbatim, the
+ * predicate the 99-of-4423 measurement was taken with, so what ships is what was
+ * measured rather than a paraphrase of it.
+ *
+ * Both directions count — sent into the room, or been addressed in it — because
+ * a worker that only ever answers briefs is a full participant with no row of
+ * its own. `messages` is already indexed by (room, seq), which covers
+ * `room = ? AND seq < ?` exactly, so this is one indexed scan on the send hot
+ * path: no membership bookkeeping, no API call.
+ */
+export const PRIOR_CONTACT_SQL =
+  `SELECT EXISTS (SELECT 1 FROM messages WHERE room = ? AND seq < ? ` +
+  `AND (sender_thread = ? OR to_thread = ?)) AS prior`;
+
+/**
+ * A DIRECTED SEND TO A STRANGER NOW SAYS SO (MX-213).
+ *
+ * `resolveRecipients` returns an explicit id unconditionally — membership is
+ * loaded and then ignored — so `bb bus send <room> --to <id>` delivers to
+ * non-members by design, and a typo'd or stale id returns the same unqualified
+ * `sent -> room, woke 1/1` as a correct one. That is how msg #4828 reached
+ * thr_r9e33xniyf, a thread that has never joined anything; it replied politely
+ * and the sender only found out from mgrin three minutes later.
+ *
+ * Non-membership is NOT the signal. Measured against the bus store 2026-08-20:
+ * only 1645 of 4423 directed sends had a recipient who was a member, so warning
+ * on that fires on 62.8% of all directed traffic — orchestrator-to-worker sends
+ * overwhelmingly target threads that never join. FIRST CONTACT IN THE ROOM is
+ * 99 of 4423, 2.2%, and the MX-203 misroute is inside it. Rare enough to read is
+ * the entire property being bought here; do not widen it.
+ *
+ * A WARNING, never a refusal — first contact is how every new worker gets its
+ * first brief, so the send has already happened by the time this is printed.
+ *
+ * What it catches: addressing a stranger to this room. What it does not: picking
+ * the wrong one of two threads that both already talk here.
+ */
+export function firstContactNotice(
+  to: string | null,
+  room: string,
+  contact: PriorContact,
+): string | null {
+  // Ambient wakes nobody, so there is no address to be wrong about. `--to all`
+  // resolves against membership rather than a hand-typed id; neither shape is in
+  // the 4423 the measurement covers, so neither gets a warning it did not earn.
+  if (!to || to === "all") return null;
+  if (contact !== "none") return null;
+  return (
+    `bus: FIRST CONTACT — ${to} has never sent into, nor been addressed in, '${room}' before; sent anyway.\n` +
+    `  a stale or typo'd id looks exactly like this and would still report woke 1/1.\n` +
+    `  expected? ignore. otherwise: bb bus who ${room}`
+  );
+}

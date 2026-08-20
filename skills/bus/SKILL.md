@@ -85,6 +85,15 @@ than one line. Composing into a file first costs nothing and cannot mangle.
   changes what they do. No acks, no thanks, no receipt confirmations.
 - **Answers and handoffs are terminal** — don't reply to an answer to confirm
   receipt.
+- **`FIRST CONTACT` on a receipt means the id may be wrong.** `--to` is never
+  checked against membership — delivering to non-members is deliberate and is
+  how most briefs are sent — so a typo'd or stale thread id returns the same
+  `sent -> room, woke 1/1` as a correct one, and the recipient may well answer
+  politely. When the receipt adds `FIRST CONTACT`, that recipient has never sent
+  into nor been addressed in this room before. Usually that is exactly right (a
+  new worker's first brief) and you ignore it; it is printed on ~2% of directed
+  sends precisely so it is worth reading the times it is not. It never blocks the
+  send, and it stays silent rather than guessing when the history cannot be read.
 - **Humans are not on the bus.** To reach the user, finish your turn with the
   question in your final message (they read threads in the bb app, including
   from their phone). Never relay a human question through a peer thread.
