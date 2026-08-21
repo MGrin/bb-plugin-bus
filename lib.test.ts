@@ -2,7 +2,19 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import Database from "better-sqlite3";
-import { PRIOR_CONTACT_SQL, firstContactNotice, fmt, parseSend, resolveRecipients, validateRoom } from "./lib.ts";
+import {
+  PRIOR_CONTACT_SQL,
+  type WakeOutcome,
+  deliverWake,
+  firstContactNotice,
+  fmt,
+  isAwaitingUserInteraction,
+  parseSend,
+  resolveRecipients,
+  summariseDirectedSend,
+  validateRoom,
+  wakeText,
+} from "./lib.ts";
 
 test("a room name starting with '-' is refused, whichever flag was mistyped", () => {
   // `bb bus join --room ops` used to create a room literally called `--room`,
@@ -232,4 +244,183 @@ test("on a realistic room only the stranger is flagged, not the fleet", () => {
   assert.equal(before, 3, "established peers must stop warning after their first brief");
   assert.equal(warned, 4, "the stranger must warn");
   assert.ok(warned / (traffic.length + 1) < 0.15, "warn rate must stay rare enough to read");
+});
+
+// ---------------------------------------------------------------------------
+// MX-228 — a directed send to a thread that is awaiting a human
+// ---------------------------------------------------------------------------
+
+/** The error bb actually throws, reproduced from the live 409 on 2026-08-21. */
+const blockedError = () =>
+  Object.assign(
+    new Error(
+      "HTTP 409: Thread is awaiting user interaction. Resolve the pending interaction before sending another prompt.",
+    ),
+    { name: "BbHttpError", status: 409, code: "awaiting_user_interaction" },
+  );
+
+test("the blocked-on-a-human refusal is recognised from its structured fields", () => {
+  assert.equal(isAwaitingUserInteraction(blockedError()), true);
+  // Structured alone is enough: a transport that drops the message still classifies.
+  assert.equal(
+    isAwaitingUserInteraction({ status: 409, code: "awaiting_user_interaction" }),
+    true,
+  );
+});
+
+test("the message string is an independent second route to the same verdict", () => {
+  // A re-wrapped or serialised error loses `status`/`code` but keeps the text.
+  assert.equal(
+    isAwaitingUserInteraction(
+      new Error("HTTP 409: Thread is awaiting user interaction. Resolve the pending interaction."),
+    ),
+    true,
+  );
+  assert.equal(isAwaitingUserInteraction("HTTP 409: Thread is awaiting user interaction"), true);
+});
+
+test("anything not positively identified is NOT a deferral", () => {
+  // The asymmetry is the point. Calling a hard failure a deferral returns exit 0
+  // over a message with no delivery path; calling a 409 a failure merely
+  // reproduces the old behaviour.
+  for (const other of [
+    new Error("HTTP 404: Thread not found"),
+    new Error("HTTP 409: Thread is archived"),
+    Object.assign(new Error("HTTP 409: nope"), { status: 409, code: "already_active" }),
+    new Error("awaiting user interaction"), // the phrase without the status
+    new Error("fetch failed"),
+    null,
+    undefined,
+    {},
+  ]) {
+    assert.equal(isAwaitingUserInteraction(other), false, String(other));
+  }
+});
+
+test("a blocked recipient is DEFERRED to bb's queue, not reported as a failure", async () => {
+  const calls: string[] = [];
+  const out = await deliverWake(
+    {
+      send: async () => {
+        calls.push("send");
+        throw blockedError();
+      },
+      defer: async () => {
+        calls.push("defer");
+      },
+    },
+    "thr_blocked",
+  );
+  assert.deepEqual(out, { kind: "deferred", recipient: "thr_blocked" });
+  // The send is ATTEMPTED first, every time. Pre-checking `hasPendingInteraction`
+  // would add a round trip and a race — the interaction can resolve between the
+  // check and the send — for an answer the send itself already gives.
+  assert.deepEqual(calls, ["send", "defer"]);
+});
+
+test("a reachable recipient is never queued", async () => {
+  const calls: string[] = [];
+  const out = await deliverWake(
+    { send: async () => void calls.push("send"), defer: async () => void calls.push("defer") },
+    "thr_awake",
+  );
+  assert.deepEqual(out, { kind: "woke", recipient: "thr_awake" });
+  assert.deepEqual(calls, ["send"]);
+});
+
+test("a non-409 failure is not queued and stays a failure", async () => {
+  const calls: string[] = [];
+  const out = await deliverWake(
+    {
+      send: async () => {
+        throw new Error("HTTP 404: Thread not found");
+      },
+      defer: async () => void calls.push("defer"),
+    },
+    "thr_gone",
+  );
+  assert.equal(out.kind, "failed");
+  assert.match((out as { error: string }).error, /404/);
+  assert.deepEqual(calls, [], "a dead thread must not accumulate queued messages");
+});
+
+test("blocked AND unqueueable is a FAILURE, and names both causes", async () => {
+  // The one lie worse than the original bug would be exit 0 here.
+  const out = await deliverWake(
+    {
+      send: async () => {
+        throw blockedError();
+      },
+      defer: async () => {
+        throw new Error("HTTP 503: queue unavailable");
+      },
+    },
+    "thr_x",
+  );
+  assert.equal(out.kind, "failed");
+  const err = (out as { error: string }).error;
+  assert.match(err, /queueing it failed/);
+  assert.match(err, /503/);
+  assert.match(err, /awaiting user interaction/i, "the original cause must survive");
+});
+
+test("a deferral exits 0 — this is the whole fix", () => {
+  // Two scheduled automations shelled a directed send, one under `set -euo
+  // pipefail` and one raising on any non-zero. Three refusals each and bb
+  // auto-paused them both, announced nowhere.
+  const r = summariseDirectedSend("ops", [{ kind: "deferred", recipient: "thr_op" }]);
+  assert.equal(r.exitCode, 0);
+  assert.equal(r.stderr, null, "a deferral must not write to stderr either");
+  assert.match(r.stdout, /QUEUED 1/);
+  assert.match(r.stdout, /awaiting a human/);
+  assert.match(r.stdout, /bb thread queue list thr_op/);
+});
+
+test("a deferral is distinguishable from a delivery in the receipt, not just the exit code", () => {
+  const woke = summariseDirectedSend("ops", [{ kind: "woke", recipient: "thr_a" }]);
+  const held = summariseDirectedSend("ops", [{ kind: "deferred", recipient: "thr_a" }]);
+  assert.equal(woke.exitCode, held.exitCode, "both are exit 0 — the text must carry the difference");
+  assert.equal(woke.stdout, "sent -> ops, woke 1/1");
+  assert.notEqual(woke.stdout, held.stdout);
+  assert.match(held.stdout, /woke 0\/1, QUEUED 1/);
+});
+
+test("a real failure still exits 1, unchanged", () => {
+  const r = summariseDirectedSend("ops", [
+    { kind: "failed", recipient: "thr_gone", error: "HTTP 404: Thread not found" },
+  ]);
+  assert.equal(r.exitCode, 1);
+  assert.match(r.stderr ?? "", /wake failures:\nthr_gone: HTTP 404/);
+  assert.match(r.stdout, /woke 0\/1/);
+});
+
+test("mixed outcomes exit 1 and still report the deferral", () => {
+  // The deferral is true whatever else went wrong, and the sender still needs it.
+  const r = summariseDirectedSend("ops", [
+    { kind: "woke", recipient: "thr_a" },
+    { kind: "deferred", recipient: "thr_b" },
+    { kind: "failed", recipient: "thr_c", error: "HTTP 404: Thread not found" },
+  ] satisfies WakeOutcome[]);
+  assert.equal(r.exitCode, 1);
+  assert.match(r.stdout, /woke 1\/3, QUEUED 1/);
+  assert.match(r.stdout, /thr_b is awaiting a human/);
+  assert.match(r.stderr ?? "", /thr_c: HTTP 404/);
+});
+
+test("a replayed message tells the recipient it was held, and when it was sent", () => {
+  // Ticket item 2. A deferred message arrives looking freshly sent, so a status
+  // report reads as current when it is hours old.
+  const fresh = wakeText({ room: "ops", sender: "thr_a", text: "PR #12 is merged" });
+  const held = wakeText({
+    room: "ops",
+    sender: "thr_a",
+    text: "PR #12 is merged",
+    deferredSentAt: "2026-08-21 09:12:03",
+  });
+  assert.match(fresh, /^\[bus:ops\] message from thread thr_a:\nPR #12 is merged/);
+  assert.doesNotMatch(fresh, /awaiting/);
+  assert.match(held, /sent 2026-08-21 09:12:03 while you were awaiting a human/);
+  assert.match(held, /PR #12 is merged/);
+  // Both keep the reply footer — a held message is still answerable.
+  for (const t of [fresh, held]) assert.match(t, /bb bus send ops --to thr_a/);
 });

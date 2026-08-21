@@ -189,3 +189,161 @@ export function firstContactNotice(
     `  expected? ignore. otherwise: bb bus who ${room}`
   );
 }
+
+/**
+ * A WAKE THAT CANNOT LAND NOW IS NOT A WAKE THAT FAILED (MX-228).
+ *
+ * `bb.sdk.threads.send` refuses a thread that is awaiting a human with HTTP 409
+ * `awaiting_user_interaction`, and it refuses in EVERY mode: the guard
+ * (`ensureThreadIsNotAwaitingUserInteraction`) sits both in the send route's
+ * queue branch and in `sendThreadMessage` itself, so `steer`, `queue` and `auto`
+ * all hit it. It is a property of the THREAD, not of the mode — `--mode auto` was
+ * tried as a remedy and could never have worked.
+ *
+ * Three states, because two collapsed into one is the whole bug. `deferred` says
+ * bb still owes the recipient this message; `failed` says nobody does.
+ */
+export type WakeOutcome =
+  | { kind: "woke"; recipient: string }
+  | { kind: "deferred"; recipient: string }
+  | { kind: "failed"; recipient: string; error: string };
+
+/**
+ * Is this the refusal that means "blocked on a human", as opposed to any other
+ * way a send can fail?
+ *
+ * POSITIVE IDENTIFICATION ONLY — anything unrecognised is `false`, and the
+ * caller then treats it as a hard failure. The two directions are not
+ * symmetrical: misreading a 409 as a failure reproduces the behaviour that
+ * shipped for months, while misreading a hard failure as a deferral returns
+ * exit 0 over a message nobody will ever deliver. Safe is "not a deferral".
+ *
+ * The structured fields are the real check: bb throws `BbHttpError`, which
+ * carries `status: number` and `code: string` alongside the message. The string
+ * path is a second, independent way to reach the same conclusion — it needs BOTH
+ * the 409 and the phrase, so prose that merely mentions awaiting a user cannot
+ * trip it — and exists so that a re-wrapped or serialised error (a CLI boundary,
+ * a structured-clone, a future transport) still classifies rather than silently
+ * degrading to `failed`.
+ */
+export function isAwaitingUserInteraction(e: unknown): boolean {
+  const err = e as { status?: unknown; code?: unknown; message?: unknown } | null;
+  if (err && typeof err === "object") {
+    if (err.status === 409 && err.code === "awaiting_user_interaction") return true;
+  }
+  const message = e instanceof Error ? e.message : typeof e === "string" ? e : "";
+  return /\b409\b/.test(message) && /awaiting user interaction/i.test(message);
+}
+
+/** The text a woken thread receives. `deferredSentAt` marks a replayed message. */
+export function wakeText(args: {
+  room: string;
+  sender: string;
+  text: string;
+  deferredSentAt?: string;
+}): string {
+  // The recipient of a deferred message has NO other way to know it was held:
+  // it arrives looking freshly sent, so a status report can read as current when
+  // it is hours old. The send time is stamped in rather than a duration because
+  // the text is fixed when the message is queued, not when it is delivered.
+  const header = args.deferredSentAt
+    ? `[bus:${args.room}] message from thread ${args.sender}, sent ${args.deferredSentAt} ` +
+      `while you were awaiting a human — held by bb and delivered now that you are not:`
+    : `[bus:${args.room}] message from thread ${args.sender}:`;
+  return (
+    `${header}\n${args.text}\n\n` +
+    `(Reply: \`bb bus send ${args.room} --to ${args.sender} "<text>"\` · backlog: \`bb bus recv\`)`
+  );
+}
+
+/**
+ * Wake one recipient, falling back to bb's own durable queue when it is blocked.
+ *
+ * `defer` is NOT a retry. Retrying solves nothing here — a pending interaction
+ * lasts as long as it takes a human to answer, which was six hours in the
+ * incident this comes from — and a bounded retry loop would only hide the state
+ * behind a longer wait. It hands the message to
+ * `bb.sdk.threads.queuedMessages.create`, which is bb's own store-and-replay:
+ * the route has no interaction guard, and bb's `queued-message-auto-send`
+ * durable-intent-retry sweep drains the queue as soon as the thread is idle
+ * again. Measured live 2026-08-21: delivered within 5s of the human answering.
+ *
+ * The bus deliberately builds NO replay machinery of its own. A second
+ * mechanism would have to be swept, expired and observed, and it could go
+ * silently blind — which is the failure this ticket already is.
+ */
+export async function deliverWake(
+  deps: { send: () => Promise<void>; defer: () => Promise<void> },
+  recipient: string,
+): Promise<WakeOutcome> {
+  const say = (e: unknown) => (e instanceof Error ? e.message : String(e));
+  try {
+    await deps.send();
+    return { kind: "woke", recipient };
+  } catch (e) {
+    if (!isAwaitingUserInteraction(e)) return { kind: "failed", recipient, error: say(e) };
+    try {
+      await deps.defer();
+      return { kind: "deferred", recipient };
+    } catch (e2) {
+      // Blocked AND unqueueable. Reporting this as a deferral would be the one
+      // lie worse than the original bug: exit 0 over a message with no delivery
+      // path at all. Both errors ride along — the second alone reads as a queue
+      // problem rather than as a blocked recipient.
+      return {
+        kind: "failed",
+        recipient,
+        error: `blocked awaiting a human, and queueing it failed: ${say(e2)} (original: ${say(e)})`,
+      };
+    }
+  }
+}
+
+/**
+ * The receipt, and the EXIT CODE — which is the part that was actually costing
+ * something (MX-228).
+ *
+ * A deferral exits 0. That is only truthful because `deliverWake` guarantees
+ * eventual delivery; without the queue fallback, exit 0 would be the "stored but
+ * looks delivered" state that is worse than refusing. Coupled, they give the
+ * property the call site actually needs: THE EXIT CODE SAYS WHETHER ANYONE STILL
+ * OWES YOU DELIVERY, and no caller has to know what a 409 is.
+ *
+ * What exit 1 cost: two scheduled automations shelled a directed send, one under
+ * `set -euo pipefail` and one raising on any non-zero. Three refusals each and
+ * bb auto-paused them both — six hours and forty-six minutes of perimeter watch
+ * off, announced nowhere. And the refusal fires precisely when the operator is
+ * blocked on a question, i.e. exactly when it has escalated something and its
+ * workers are most likely to be reporting.
+ *
+ * A hard failure still exits 1, unchanged. Mixed outcomes exit 1 and name both:
+ * the deferral is still true and the sender still needs it.
+ */
+export function summariseDirectedSend(
+  room: string,
+  outcomes: WakeOutcome[],
+): { stdout: string; stderr: string | null; exitCode: 0 | 1 } {
+  const deferred = outcomes.filter((o) => o.kind === "deferred");
+  const failed = outcomes.filter((o) => o.kind === "failed") as Extract<
+    WakeOutcome,
+    { kind: "failed" }
+  >[];
+  const woke = outcomes.length - deferred.length - failed.length;
+  const head =
+    `sent -> ${room}, woke ${woke}/${outcomes.length}` +
+    (deferred.length ? `, QUEUED ${deferred.length}` : "");
+  const lines = [head];
+  for (const d of deferred) {
+    lines.push(
+      `bus: ${d.recipient} is awaiting a human, so nothing can wake it now — the message ` +
+        `was QUEUED in bb and delivers by itself when the interaction is answered.`,
+      `  A deferral, not a failure: that is why this is exit 0. ` +
+        `Still queued? bb thread queue list ${d.recipient}`,
+    );
+  }
+  return {
+    stdout: lines.join("\n"),
+    stderr: failed.length ? `wake failures:\n${failed.map((f) => `${f.recipient}: ${f.error}`).join("\n")}` : null,
+    exitCode: failed.length ? 1 : 0,
+  };
+}
