@@ -94,6 +94,15 @@ than one line. Composing into a file first costs nothing and cannot mangle.
   new worker's first brief) and you ignore it; it is printed on ~2% of directed
   sends precisely so it is worth reading the times it is not. It never blocks the
   send, and it stays silent rather than guessing when the history cannot be read.
+- **`QUEUED` on a receipt means DEFERRED, not dropped.** A thread that is
+  awaiting a human cannot be woken at all — bb refuses it in every send mode,
+  because it is a property of the thread and not of the mode. The bus hands
+  that message to bb's own message queue, which delivers it by itself the
+  moment the interaction is answered, so the receipt reads
+  `woke 0/1, QUEUED 1` and **exits 0**: nothing is owed to you any more.
+  A genuine failure — a dead or unreachable thread — still exits 1, so a
+  caller under `set -e` aborts on the one it should and survives the one it
+  should not. `bb thread queue list <id>` shows anything still waiting.
 - **Humans are not on the bus.** To reach the user, finish your turn with the
   question in your final message (they read threads in the bb app, including
   from their phone). Never relay a human question through a peer thread.
