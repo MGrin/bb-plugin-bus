@@ -1,0 +1,29 @@
+# The unit suite as an actual gate.
+#
+# Until MX-228 this repo's only CI job was `managed-install`, which proves the
+# plugin BUILDS from a git install and says nothing about whether it works.
+# `npm test` ran only when somebody typed it, so a green PR meant "it compiles".
+# MX-219 is the sharper version of the same point: nothing here exercises
+# server.ts, and a worker proved 23/23 still passed with a call deleted. This
+# job closes the half that CAN be closed — the pure logic in lib.ts — and does
+# not pretend to close the other.
+name: Test
+
+on:
+  pull_request:
+  push:
+    branches: [main, main-public]
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: unit tests and typecheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: npm install --no-audit --no-fund
+      - run: npm run typecheck
+      - run: npm test

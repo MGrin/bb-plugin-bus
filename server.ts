@@ -16,11 +16,15 @@ import {
   type BusMessage,
   PRIOR_CONTACT_SQL,
   type PriorContact,
+  type WakeOutcome,
+  deliverWake,
   firstContactNotice,
   fmt,
   parseSend,
   resolveRecipients,
+  summariseDirectedSend,
   validateRoom,
+  wakeText,
 } from "./lib.ts";
 
 /**
@@ -88,31 +92,51 @@ export default async function plugin(bb: BbPluginApi) {
   bb.events.on("thread.archived", ({ thread }) => dropThread(thread.id));
   bb.events.on("thread.deleted", ({ thread }) => dropThread(thread.id));
 
+  /**
+   * Wake one recipient — or, when it is blocked on a human, hand the message to
+   * bb's own queue so bb delivers it on unblock (MX-228). The decision lives in
+   * `deliverWake` so `node --test` can exercise every branch of it; this
+   * function is only the two SDK calls it chooses between.
+   *
+   * `queuedMessages.create` is deliberately NOT guarded against a pending
+   * interaction, and a blocked thread reads `status: "active"`, so bb's
+   * `queued-message-auto-send` sweep — which only visits IDLE threads — cannot
+   * fire it early. It drains once the human has answered and the turn has ended.
+   */
   async function wake(
     recipient: string,
     room: string,
     sender: string,
     text: string,
-  ): Promise<string | null> {
-    try {
-      await bb.sdk.threads.send({
-        threadId: recipient,
-        mode: "auto",
-        senderThreadId: sender,
-        input: [
-          {
-            type: "text",
-            mentions: [],
-            text:
-              `[bus:${room}] message from thread ${sender}:\n${text}\n\n` +
-              `(Reply: \`bb bus send ${room} --to ${sender} "<text>"\` · backlog: \`bb bus recv\`)`,
-          },
-        ],
-      });
-      return null;
-    } catch (e) {
-      return `${recipient}: ${e instanceof Error ? e.message : String(e)}`;
-    }
+    sentAt: string,
+  ): Promise<WakeOutcome> {
+    const input = (deferredSentAt?: string) => [
+      {
+        type: "text" as const,
+        mentions: [],
+        text: wakeText({ room, sender, text, ...(deferredSentAt ? { deferredSentAt } : {}) }),
+      },
+    ];
+    return deliverWake(
+      {
+        send: async () => {
+          await bb.sdk.threads.send({
+            threadId: recipient,
+            mode: "auto",
+            senderThreadId: sender,
+            input: input(),
+          });
+        },
+        defer: async () => {
+          await bb.sdk.threads.queuedMessages.create({
+            threadId: recipient,
+            senderThreadId: sender,
+            input: input(sentAt),
+          });
+        },
+      },
+      recipient,
+    );
   }
 
   /**
@@ -320,12 +344,17 @@ export default async function plugin(bb: BbPluginApi) {
             };
           }
           const recipients = resolveRecipients(to, members, me!);
-          const errors: string[] = [];
+          // Stamped from the row rather than the clock so a replayed message
+          // names the time `bb bus log` shows for it.
+          const sentAt = (
+            (db.prepare(`SELECT created_ts FROM messages WHERE seq = ?`).get(written.lastInsertRowid) ?? {
+              created_ts: "",
+            }) as { created_ts: string }
+          ).created_ts;
+          const outcomes: WakeOutcome[] = [];
           for (const r of recipients) {
-            const err = await wake(r, room, me!, text);
-            if (err) errors.push(err);
+            outcomes.push(await wake(r, room, me!, text, sentAt));
           }
-          const okCount = recipients.length - errors.length;
           // A DIRECTED SEND TO A STRANGER NOW SAYS SO (MX-213). `woke 1/1` is true of a
           // correct address and of a typo'd one alike — that is how #4828 reached a thread
           // that has never joined anything, which answered politely, and the sender learned
@@ -337,11 +366,11 @@ export default async function plugin(bb: BbPluginApi) {
             room,
             priorContact(room, to!, Number(written.lastInsertRowid)),
           );
-          const summary =
-            `sent -> ${room}, woke ${okCount}/${recipients.length}` + (notice ? `\n${notice}` : "");
-          return errors.length
-            ? { exitCode: 1, stdout: summary, stderr: `wake failures:\n${errors.join("\n")}` }
-            : { exitCode: 0, stdout: summary };
+          const receipt = summariseDirectedSend(room, outcomes);
+          const stdout = receipt.stdout + (notice ? `\n${notice}` : "");
+          return receipt.stderr
+            ? { exitCode: receipt.exitCode, stdout, stderr: receipt.stderr }
+            : { exitCode: receipt.exitCode, stdout };
         }
         case "recv": {
           const onlyRoom = argv[1];
