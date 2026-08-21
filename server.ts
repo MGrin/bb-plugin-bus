@@ -8,7 +8,7 @@
 // - Presence derives from thread lifecycle: archived/deleted threads drop out
 //   of every room automatically.
 // - A room send without --to is ambient: stored for recv/log, wakes nobody.
-import type { BbPluginApi } from "@bb/plugin-sdk";
+import type { BbPluginApi } from "@get-bb/plugin-sdk";
 // Argument parsing, recipient resolution and message formatting live in lib.ts
 // so `node --test` can exercise them without bb, sqlite or a network.
 import { execFileSync } from "node:child_process";
