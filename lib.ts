@@ -121,7 +121,7 @@ export const fmt = (m: BusMessage): string =>
   `: ${m.text}`;
 
 /**
- * Has this thread ever been part of THIS room's conversation? (MX-213)
+ * Has this thread ever been part of THIS room's conversation?
  *
  * `unknown` is a real answer, not a failure to produce one: if the history
  * cannot be read the caller must stay silent. A warning that fires when blind
@@ -151,20 +151,20 @@ export const PRIOR_CONTACT_SQL =
   `AND (sender_thread = ? OR to_thread = ?)) AS prior`;
 
 /**
- * A DIRECTED SEND TO A STRANGER NOW SAYS SO (MX-213).
+ * A DIRECTED SEND TO A STRANGER NOW SAYS SO.
  *
  * `resolveRecipients` returns an explicit id unconditionally — membership is
  * loaded and then ignored — so `bb bus send <room> --to <id>` delivers to
  * non-members by design, and a typo'd or stale id returns the same unqualified
  * `sent -> room, woke 1/1` as a correct one. That is how msg #4828 reached
- * thr_r9e33xniyf, a thread that has never joined anything; it replied politely
+ * thr_example001, a thread that has never joined anything; it replied politely
  * and the sender only found out from mgrin three minutes later.
  *
  * Non-membership is NOT the signal. Measured against the bus store 2026-08-20:
  * only 1645 of 4423 directed sends had a recipient who was a member, so warning
  * on that fires on 62.8% of all directed traffic — orchestrator-to-worker sends
  * overwhelmingly target threads that never join. FIRST CONTACT IN THE ROOM is
- * 99 of 4423, 2.2%, and the MX-203 misroute is inside it. Rare enough to read is
+ * 99 of 4423, 2.2%, and that same misroute is inside it. Rare enough to read is
  * the entire property being bought here; do not widen it.
  *
  * A WARNING, never a refusal — first contact is how every new worker gets its
@@ -191,7 +191,7 @@ export function firstContactNotice(
 }
 
 /**
- * A WAKE THAT CANNOT LAND NOW IS NOT A WAKE THAT FAILED (MX-228).
+ * A WAKE THAT CANNOT LAND NOW IS NOT A WAKE THAT FAILED.
  *
  * `bb.sdk.threads.send` refuses a thread that is awaiting a human with HTTP 409
  * `awaiting_user_interaction`, and it refuses in EVERY mode: the guard
@@ -301,7 +301,7 @@ export async function deliverWake(
 
 /**
  * The receipt, and the EXIT CODE — which is the part that was actually costing
- * something (MX-228).
+ * something.
  *
  * A deferral exits 0. That is only truthful because `deliverWake` guarantees
  * eventual delivery; without the queue fallback, exit 0 would be the "stored but
