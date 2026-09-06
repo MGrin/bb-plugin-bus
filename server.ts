@@ -28,7 +28,7 @@ import {
 } from "./lib.ts";
 
 /**
- * Which commit is this PROCESS running? (MX-139/MX-141)
+ * Which commit is this PROCESS running?
  *
  * bb bundles a `path:` plugin FROM SOURCE at reload, so a revision read here — at module
  * load, the same moment — is by construction the code now executing. Nothing else can say:
@@ -94,7 +94,7 @@ export default async function plugin(bb: BbPluginApi) {
 
   /**
    * Wake one recipient — or, when it is blocked on a human, hand the message to
-   * bb's own queue so bb delivers it on unblock (MX-228). The decision lives in
+   * bb's own queue so bb delivers it on unblock. The decision lives in
    * `deliverWake` so `node --test` can exercise every branch of it; this
    * function is only the two SDK calls it chooses between.
    *
@@ -141,7 +141,7 @@ export default async function plugin(bb: BbPluginApi) {
 
   /**
    * Has `threadId` ever been part of `room`'s conversation before message `seq`?
-   * (MX-213 — see firstContactNotice in lib.ts for why this signal and not another.)
+   * (see firstContactNotice in lib.ts for why this signal and not another.)
    *
    * THREE-STATE, and the third one is the point. If the history cannot be read
    * the answer is "unknown" and the caller stays SILENT — never a warning, and
@@ -300,7 +300,7 @@ export default async function plugin(bb: BbPluginApi) {
           const members = (
             db.prepare(`SELECT thread_id FROM members WHERE room = ?`).all(room) as { thread_id: string }[]
           ).map((r) => r.thread_id);
-          // AN AMBIENT SEND NOW SAYS WHO IT DID NOT WAKE (MX-148).
+          // AN AMBIENT SEND NOW SAYS WHO IT DID NOT WAKE.
           //
           // `sent (ambient) -> room` is a true and completely uninterpretable receipt: it
           // returns cleanly, the room's message count rises — which is the check AGENTS.md
@@ -314,7 +314,7 @@ export default async function plugin(bb: BbPluginApi) {
           // ACTIVE thread reaches the room on its own turn, an idle one never does.
           //
           // The status lookup is capped. This is the hot path of every ambient send, and
-          // this machine is regularly at load 50+ with bb dropping writes (MX-138/MX-146);
+          // this machine is regularly at load 50+ with bb dropping writes under load;
           // a broadcast to a large room must not turn into a burst of API calls. Above the
           // cap the honest answer is the membership count, which needs no calls at all.
           if (!to) {
@@ -355,7 +355,7 @@ export default async function plugin(bb: BbPluginApi) {
           for (const r of recipients) {
             outcomes.push(await wake(r, room, me!, text, sentAt));
           }
-          // A DIRECTED SEND TO A STRANGER NOW SAYS SO (MX-213). `woke 1/1` is true of a
+          // A DIRECTED SEND TO A STRANGER NOW SAYS SO. `woke 1/1` is true of a
           // correct address and of a typo'd one alike — that is how #4828 reached a thread
           // that has never joined anything, which answered politely, and the sender learned
           // nothing. The notice rides on the SAME receipt because that is the one thing the

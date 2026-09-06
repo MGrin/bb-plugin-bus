@@ -137,12 +137,12 @@ test("fmt shows the arrow only when a message was addressed", () => {
 });
 
 // ---------------------------------------------------------------------------
-// MX-213 — a wrong --to gets a clean success receipt.
+// A wrong --to gets a clean success receipt.
 // ---------------------------------------------------------------------------
 
 test("first contact: an explicit id with no prior traffic in the room is flagged", () => {
-  const n = firstContactNotice("thr_r9e33xniyf", "machine-config", "none");
-  assert.match(n ?? "", /thr_r9e33xniyf/);
+  const n = firstContactNotice("thr_example001", "machine-config", "none");
+  assert.match(n ?? "", /thr_example001/);
   assert.match(n ?? "", /machine-config/);
   // It is a WARNING, not a refusal: the receipt must still say the send happened,
   // or a reader will resend and double-deliver.
@@ -203,7 +203,7 @@ test("prior contact counts BOTH directions, and only in the same room", () => {
   ]);
   assert.equal(contact(db, "ops", "thr_spoke"), "prior");
   assert.equal(contact(db, "ops", "thr_heard"), "prior");
-  // The MX-203 shape: live thread, replies politely, zero prior traffic HERE.
+  // A live thread that replies politely but has zero prior traffic HERE.
   assert.equal(contact(db, "ops", "thr_stranger"), "none");
   // Room isolation — otherwise a busy peer in one room silences the check in all.
   assert.equal(contact(db, "ops", "thr_elsewhere"), "none");
@@ -247,7 +247,7 @@ test("on a realistic room only the stranger is flagged, not the fleet", () => {
 });
 
 // ---------------------------------------------------------------------------
-// MX-228 — a directed send to a thread that is awaiting a human
+// A directed send to a thread that is awaiting a human
 // ---------------------------------------------------------------------------
 
 /** The error bb actually throws, reproduced from the live 409 on 2026-08-21. */
