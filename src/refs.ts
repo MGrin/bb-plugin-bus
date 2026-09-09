@@ -8,7 +8,16 @@
 // `woke 1/1`. A prefix that names nothing is the same failure one level down.
 
 export const REF_PREFIXES = ["task:", "pr:", "path:", "thread:", "store:"] as const;
-export const RESOURCE_PREFIXES = ["pr:", "task:", "branch:", "path:", "store:"] as const;
+// `thread:` is HERE because a thread delete is one of the four acts the claim protocol
+// covers, and it was omitted while the comment three lines up already said it was claimed
+// "under its own `thread:` resource". The code and its own comment disagreed, and the way
+// that surfaced is the shape worth remembering: the live suite's teardown claims
+// `thread:<id>` before deleting, ignores the rc, and deleted anyway — so the claim had
+// been refused on every run since the rework and nothing was worse for it. It becomes
+// load-bearing the moment cc-guard's `bus_claim_required` lands (MX-812), which REFUSES a
+// thread delete without a claim: an unclaimable resource would make that verb unusable.
+export const RESOURCE_PREFIXES =
+  ["pr:", "task:", "branch:", "path:", "store:", "thread:"] as const;
 
 const STORES = ["memory", "tasks", "bus"] as const;
 
