@@ -82,8 +82,14 @@ taken by the next claimant and **the displaced holder is told** — an expiry th
 ledger records is one the old holder acts against. Re-claiming what you hold is idempotent.
 Resources are `pr:n` `task:KEY` `branch:name` `path:glob` `thread:thr_x` `store:memory|tasks|bus`.
 
-**cc-guard refuses these four without the claim, and there is no override** — the remedy is
-one command:
+**Claim these four before you take them.** The store arbitrates today: the first holder
+wins and a second claimant gets `busy` at **rc 75**, which is real and enforced here.
+
+**cc-guard does NOT yet refuse them.** `bus_claim_required` is specified in
+`docs/guard/mx849-handoff.md` and lands on MX-812; the deployed binary has no such rule —
+measured 2026-09-09, zero hits for `claim` in its `--help` and no source on main. So this
+is a CONVENTION you are asked to keep, not a refusal that will stop you, and a session that
+skips it gets no warning. Flip this paragraph when MX-812 deploys.
 
 | before | you hold |
 |---|---|
