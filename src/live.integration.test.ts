@@ -14,7 +14,9 @@
 //
 // Skipped automatically when bb is not answering, so the repo stays testable anywhere.
 import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
 import { deepStrictEqual, match, ok, strictEqual } from "node:assert/strict";
 import { KIND_NAMES } from "./kinds.ts";
@@ -82,13 +84,22 @@ const rows = (args: string[]): Record<string, unknown>[] => {
 suite("a real bb, two real threads", () => {
   let a = "";
   let b = "";
+  let project = "";
 
   before(() => {
     ok(me, "BB_THREAD_ID must be set — this suite runs from inside a bb thread");
+    const st = bb(["status", "--json"]);
+    strictEqual(st.rc, 0, `bb status failed: ${st.stderr}`);
+    project = (JSON.parse(st.stdout) as { project?: { id?: string } }).project?.id ?? "";
+    ok(project, "bb status did not report a project id");
     const spawn = (title: string): string => {
       // SPAWN_GATE_OK is NOT set: if the box cannot afford two throwaway threads, this
       // suite must refuse rather than add load, and the refusal is the honest reading.
-      const r = bb(["thread", "spawn", "--parent-self", "--title", title, "--prompt",
+      // --project is REQUIRED and its absence is a loud `required option` error, not a
+      // default. Read from bb rather than hard-coded: this suite must run in whatever
+      // project the thread lives in, and a literal id would work here and nowhere else.
+      const r = bb(["thread", "spawn", "--parent-self", "--project", project,
+        "--title", title, "--prompt",
         "You are a bus integration-test target. Do nothing at all. Do not reply, do not " +
         "run commands, and end your turn immediately.", "--json"]);
       strictEqual(r.rc, 0, `spawn refused: ${r.stderr}`);
@@ -106,7 +117,10 @@ suite("a real bb, two real threads", () => {
     // one — the suite must go through the same gate as everyone else.
     for (const id of [a, b].filter(Boolean)) {
       bb(["bus", "claim", `thread:${id}`, "--reason", "bus live suite teardown"]);
-      bb(["thread", "delete", id]);
+      // --yes is REQUIRED off a terminal: without it bb answers "Refusing destructive
+      // action without an interactive terminal" at rc 1 and the thread survives as a
+      // worker nobody briefed. Found by this suite's first real run.
+      bb(["thread", "delete", id, "--yes"]);
       bb(["bus", "release", `thread:${id}`]);
     }
   });
@@ -155,10 +169,35 @@ suite("a real bb, two real threads", () => {
   });
 
   it("a body over the cap is refused with its length and no override is offered", () => {
-    const r = bb(["bus", "note", "--to", me, "--body", "-"], "x".repeat(601));
-    strictEqual(r.rc, 1);
+    const f = join(tmpdir(), `bus-live-cap-${process.pid}.txt`);
+    writeFileSync(f, "x".repeat(601));
+    const r = bb(["bus", "note", "--to", me, "--body-file", f]);
+    rmSync(f, { force: true });
+    strictEqual(r.rc, 1, `expected a refusal, got rc ${r.rc}: ${r.stdout}${r.stderr}`);
     match(r.stderr, /601/);
     match(r.stderr, /no override/);
+  });
+
+  it("A BODY ACTUALLY ARRIVES — the cap test alone cannot tell a refusal from an empty body", () => {
+    // This is the arm that was missing, and its absence is why `--body -` shipped: the
+    // cap test passed at rc 0 because the body was EMPTY, which reads identically to a
+    // cap that never needed to fire. Assert the round trip, not the status.
+    const f = join(tmpdir(), `bus-live-body-${process.pid}.txt`);
+    const marker = `round-trip-${Date.now()}`;
+    writeFileSync(f, marker);
+    const r = bb(["bus", "note", "--to", me, "--body-file", f]);
+    rmSync(f, { force: true });
+    strictEqual(r.rc, 0, r.stderr);
+    const seq = Number(/#(\d+)/.exec(r.stdout)![1]);
+    const row = rows(["bus", "log", "-n", "20"]).find((m) => m.seq === seq);
+    ok(row, `no row #${seq}`);
+    strictEqual(row.body, marker, "the body did not survive the CLI -> server boundary");
+  });
+
+  it("--body - REFUSES rather than silently sending nothing", () => {
+    const r = bb(["bus", "note", "--to", me, "--body", "-"], "piped");
+    strictEqual(r.rc, 1);
+    match(r.stderr, /does not forward stdin/);
   });
 
   it("THE SKILL'S KIND TABLE MATCHES THE CODE — documentation that can go red", () => {

@@ -43,21 +43,28 @@ fields replaces the 1,879-character median the old bus carried; if you are reach
 
 `ref` is one of `task:MX-n` `pr:n` `path:p` `thread:thr_x` `store:memory|tasks|bus`.
 
-## The body never comes from argv
+## The body comes from a FILE
 
 Your shell substitutes backticks and `$(...)` before bb sees the command. On 2026-08-15 a
 bus message containing `git checkout main` moved the sender's worktree and arrived with the
 command's output pasted into it. The CLI has no argv slot for a body:
 
 ```sh
-bb bus note --to thr_abc --body - <<'MSG'
+cat > /tmp/msg <<'MSG'
 `backticks` and $(anything) are literal here
 MSG
+bb bus note --to thr_abc --body-file /tmp/msg
 ```
 
-`<<'MSG'` quoted is load-bearing — `<<MSG` unquoted still substitutes. **The body is capped
-at 600 characters by the schema and there is no override.** Put facts in fields; the body is
-for the one thing that is not a field.
+`<<'MSG'` quoted is load-bearing — `<<MSG` unquoted still substitutes.
+
+**`--body -` does not exist and refuses by name.** bb does not forward stdin to a plugin
+CLI: the plugin runs inside the bb *server*, so a piped body reached nothing. It shipped
+that way for an hour on 2026-09-09 and stored EMPTY bodies at rc 0, telling every sender it
+had worked — which is why the flag refuses instead of merely being absent.
+
+**The body is capped at 600 characters by the schema and there is no override.** Put facts
+in fields; the body is for the one thing that is not a field.
 
 ## Claim a resource before you take it
 
