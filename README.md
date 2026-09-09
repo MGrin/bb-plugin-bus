@@ -47,6 +47,22 @@ override**. The cap it replaces was a hook, and it was overridden 3,603 times ag
 refusals. `note` is the only free-prose kind and the plugin reports its share so it can be
 watched shrinking.
 
+## The shape
+
+One responsibility per unit, and `server.ts` decides nothing — that is what keeps every
+rule reachable by `node --test` without bb running.
+
+| unit | responsibility |
+|---|---|
+| `src/kinds.ts` | **the kind table** — the single source for fields, ack and wake mode |
+| `src/refs.ts` | the two prefixed vocabularies (`ref` and `resource` are not the same) |
+| `src/envelope.ts` | validation, `BODY_CAP`, the one-line injected form |
+| `src/store.ts` | the two tables — `messages`, `claims` — and every statement over them |
+| `src/claims.ts` | the claim state machine, pure over an injected clock |
+| `src/delivery.ts` | one delivery primitive, two modes, the 409 fallback |
+| `src/cli.ts` | argv; the verb list is generated from the kind table |
+| `server.ts` | bb wiring only |
+
 ## Claims
 
 First holder wins; a second claimant gets `busy` at rc 75. Default TTL 30 minutes, maximum
