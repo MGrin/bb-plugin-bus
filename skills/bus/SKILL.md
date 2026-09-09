@@ -41,7 +41,7 @@ bb bus ack --ack-of 412 --answer 'merged, go'          # --to is derived from #4
 fields replaces the 1,879-character median the old bus carried; if you are reaching for
 `note`, look for the kind that has a field for the fact you are about to write out.
 
-`ref` is one of `task:MX-n` `pr:n` `path:p` `thread:thr_x` `store:memory|tasks|bus`.
+`ref` is one of `task:MX-n` `pr:n` `path:p` `store:memory|tasks|bus`.
 
 ## The body comes from a FILE
 
@@ -80,7 +80,7 @@ bb bus claims [--stale] [--mine]
 First holder wins; default TTL 30 minutes, maximum 4 hours. Past expiry the resource is
 taken by the next claimant and **the displaced holder is told** — an expiry that only a
 ledger records is one the old holder acts against. Re-claiming what you hold is idempotent.
-Resources are `pr:n` `task:KEY` `branch:name` `path:glob` `store:memory|tasks|bus`.
+Resources are `pr:n` `task:KEY` `branch:name` `path:glob` `thread:thr_x` `store:memory|tasks|bus`.
 
 **cc-guard refuses these four without the claim, and there is no override** — the remedy is
 one command:
