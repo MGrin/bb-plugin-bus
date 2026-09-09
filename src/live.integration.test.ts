@@ -154,6 +154,34 @@ suite("a real bb, two real threads", () => {
         (m) => m.seq === seq && m.delivered_ts !== null));
   });
 
+  it("EVERY --to gets a message, and a bad one anywhere sends NOTHING (MX-852)", () => {
+    // `--to A --to B` used to deliver to B alone at rc 0, printing a receipt naming only
+    // B: two recipients collapsed into one, reading as a correct send. Assert BOTH halves
+    // — that each address gets its own row, and that a bad address anywhere refuses the
+    // whole send rather than delivering a prefix of it.
+    const f = join(tmpdir(), `bus-live-fanout-${process.pid}.txt`);
+    const marker = `fanout-${Date.now()}`;
+    writeFileSync(f, marker);
+    const r = bb(["bus", "note", "--to", me, "--to", b, "--body-file", f]);
+    rmSync(f, { force: true });
+    strictEqual(r.rc, 0, r.stderr);
+    const seqs = [...r.stdout.matchAll(/#(\d+)/g)].map((m) => Number(m[1]));
+    strictEqual(seqs.length, 2, `the receipt must name both recipients, got: ${r.stdout}`);
+    const rows2 = rows(["bus", "log", "-n", "20"]);
+    const got = seqs.map((q) => rows2.find((m) => m.seq === q)).filter(Boolean);
+    strictEqual(got.length, 2, "both rows must be in the store");
+    deepStrictEqual(got.map((m) => m!.to_addr).sort(), [me, b].sort());
+    for (const m of got) strictEqual(m!.body, marker, "each row carries the body");
+
+    // A bad address anywhere refuses everything. A partial send reported as a failure is
+    // the worst of the three outcomes: the sender cannot tell what arrived.
+    const before = rows(["bus", "log", "-n", "5"]).length;
+    const bad = bb(["bus", "note", "--to", me, "--to", "thr_definitelynotathread"]);
+    strictEqual(bad.rc, 1);
+    match(bad.stderr, /NOTHING was sent/);
+    strictEqual(rows(["bus", "log", "-n", "5"]).length, before, "no row may be written");
+  });
+
   it("a queue kind does not steer a live turn — a report is queued, not injected mid-turn", () => {
     const r = bb(["bus", "report", "--to", b, "--ref", `thread:${b}`,
       "--status", "working", "--next", "nothing"]);

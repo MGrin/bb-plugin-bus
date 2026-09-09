@@ -35,7 +35,7 @@ test("send parses kind, to, ref and repeated --field k=v", () => {
     "--field", "status=blocked", "--field", "next=merge #679"]);
   strictEqual(p.error, null);
   strictEqual(p.kind, "report");
-  strictEqual(p.to, "thr_b");
+  deepStrictEqual(p.to, ["thr_b"]);
   deepStrictEqual(p.fields, { status: "blocked", next: "merge #679" });
 });
 
@@ -77,6 +77,16 @@ test("a missing --to is refused: there is no ambient send any more", () => {
   match(String(parseSend(["send", "--kind", "note"]).error), /--to/);
 });
 
+test("EVERY --to is kept, in order — the last one used to win at rc 0 (MX-852)", () => {
+  // `--to A --to B --to C` delivered to C alone and printed a receipt naming only C, so
+  // three dropped recipients read as a correct send. The announcement ritual — MERGING,
+  // FILING, SAVING — is a multi-recipient send by construction, so this defeated the one
+  // guarantee announcing gives.
+  const p = parseSend(["send", "--kind", "note", "--to", "thr_a", "--to", "thr_b", "--to", "thr_c"]);
+  strictEqual(p.error, null);
+  deepStrictEqual(p.to, ["thr_a", "thr_b", "thr_c"]);
+});
+
 test("a missing --kind is refused", () => {
   match(String(parseSend(["send", "--to", "thr_b"]).error), /--kind/);
 });
@@ -109,7 +119,7 @@ test("ack takes --ack-of as a number and may omit --to", () => {
   const p = parseSugar("ack", ["ack", "--ack-of", "412", "--answer", "yes"]);
   strictEqual(p.error, null);
   strictEqual(p.ackOf, 412);
-  strictEqual(p.to, null);
+  deepStrictEqual(p.to, []);
 });
 
 test("--ack-of that is not a number is refused", () => {
