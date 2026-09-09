@@ -162,7 +162,11 @@ suite("a real bb, two real threads", () => {
     const f = join(tmpdir(), `bus-live-fanout-${process.pid}.txt`);
     const marker = `fanout-${Date.now()}`;
     writeFileSync(f, marker);
-    const r = bb(["bus", "note", "--to", me, "--to", b, "--body-file", f]);
+    // TO A AND B, NOT TO ME — both are disposable and deleted in teardown. Addressing
+    // this at the runner reintroduced the #18 defect inside the arm that fixed #852: a
+    // queue kind never steers a live turn but DOES start an idle recipient, so every run
+    // woke whoever ran it. It did so once before anybody noticed the suite was the sender.
+    const r = bb(["bus", "note", "--to", a, "--to", b, "--body-file", f]);
     rmSync(f, { force: true });
     strictEqual(r.rc, 0, r.stderr);
     const seqs = [...r.stdout.matchAll(/#(\d+)/g)].map((m) => Number(m[1]));
@@ -170,13 +174,13 @@ suite("a real bb, two real threads", () => {
     const rows2 = rows(["bus", "log", "-n", "20"]);
     const got = seqs.map((q) => rows2.find((m) => m.seq === q)).filter(Boolean);
     strictEqual(got.length, 2, "both rows must be in the store");
-    deepStrictEqual(got.map((m) => m!.to_addr).sort(), [me, b].sort());
+    deepStrictEqual(got.map((m) => m!.to_addr).sort(), [a, b].sort());
     for (const m of got) strictEqual(m!.body, marker, "each row carries the body");
 
     // A bad address anywhere refuses everything. A partial send reported as a failure is
     // the worst of the three outcomes: the sender cannot tell what arrived.
     const before = rows(["bus", "log", "-n", "5"]).length;
-    const bad = bb(["bus", "note", "--to", me, "--to", "thr_definitelynotathread"]);
+    const bad = bb(["bus", "note", "--to", a, "--to", "thr_definitelynotathread"]);
     strictEqual(bad.rc, 1);
     match(bad.stderr, /NOTHING was sent/);
     strictEqual(rows(["bus", "log", "-n", "5"]).length, before, "no row may be written");
