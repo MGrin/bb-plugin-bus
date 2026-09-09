@@ -101,6 +101,7 @@ const UNANSWERED_SQL = `
 
 export interface Store {
   insertMessage(from: string, e: Envelope, now: string): number;
+  getMessage(seq: number): MessageRow | null;
   markDelivered(seq: number, now: string): void;
   markReadFor(thread: string, now: string): number;
   log(f: LogFilter): MessageRow[];
@@ -123,6 +124,10 @@ export function createStore(db: Db): Store {
         .run(e.kind, from, e.to, e.ref, JSON.stringify(e.fields), e.body,
              e.ackRequired ? 1 : 0, e.ackOf, now);
       return Number(r.lastInsertRowid);
+    },
+
+    getMessage(seq) {
+      return (db.prepare(`SELECT * FROM messages WHERE seq = ?`).get(seq) as MessageRow) ?? null;
     },
 
     markDelivered(seq, now) {

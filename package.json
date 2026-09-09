@@ -8,7 +8,7 @@
   },
   "bb": {
     "name": "Bus",
-    "description": "Peer session bus between bb threads: rooms, presence, ambient messages, and addressed sends that wake the recipient.",
+    "description": "Typed peer bus between bb threads: twelve message kinds, TTL'd resource claims, delivery on bb's own send primitive. One stream, no rooms.",
     "branding": {
       "icon": "Radio"
     },
@@ -33,7 +33,8 @@
     "url": "git+https://github.com/MGrin/bb-plugin-bus.git"
   },
   "scripts": {
-    "test": "node --test --experimental-strip-types lib.test.ts",
+    "test": "node --test --experimental-strip-types src/kinds.test.ts src/refs.test.ts src/envelope.test.ts src/store.test.ts src/claims.test.ts src/delivery.test.ts src/cli.test.ts",
+    "test:live": "node --test --experimental-strip-types src/live.integration.test.ts",
     "typecheck": "tsc --noEmit"
   }
 }
