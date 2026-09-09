@@ -257,7 +257,15 @@ export default async function plugin(bb: BbPluginApi) {
           case "send": case "help": default: {
             const sugar = isKind(cmd);
             if (cmd !== "send" && !sugar) {
-              return { exitCode: 0, stdout: helpText() };
+              // AN UNKNOWN VERB REFUSES. The old plugin fell through to its help and
+              // exited 0 for anything it did not recognise, which is on record as a way
+              // a wrong command reads as a working one (docs/bb-cli-failure-shapes.md).
+              // A liveness probe written against that behaviour cannot tell an installed
+              // plugin from a typo, and this suite's own probe was fooled by it.
+              if (cmd === "help" || cmd === "--help") {
+                return { exitCode: 0, stdout: helpText() };
+              }
+              return fail(`bus: no such verb '${cmd}'.\n${helpText()}`);
             }
             const p = sugar ? parseSugar(cmd, argv) : parseSend(argv);
             if (p.error) return fail(p.error);
