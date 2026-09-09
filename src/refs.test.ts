@@ -35,6 +35,16 @@ test("resource has its own vocabulary: branch: is a resource, not a ref", () => 
   match(String(validateRef("branch:main")), /branch:/);
 });
 
+test("thread: is CLAIMABLE — a thread delete is one of the four acts the protocol covers", () => {
+  // This was the omission: `thread:` was a ref and not a resource, so `bb bus claim
+  // thread:thr_x` refused, and the live suite's teardown had been claiming into a refusal
+  // on every run without noticing because it ignores the rc. It becomes load-bearing when
+  // cc-guard's bus_claim_required lands — that rule REFUSES a thread delete without a
+  // claim, and an unclaimable resource would make the verb unusable.
+  strictEqual(validateResource("thread:thr_abc123"), null);
+  match(String(validateResource("thread:")), /names nothing/);
+});
+
 test("pr: must be a number — pr:main is the shape that reached a stranger", () => {
   strictEqual(validateResource("pr:685"), null);
   match(String(validateResource("pr:main")), /number/);
