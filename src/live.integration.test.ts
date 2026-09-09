@@ -163,7 +163,11 @@ suite("a real bb, two real threads", () => {
   });
 
   it("an unknown address is REFUSED, not delivered to a stranger", () => {
-    const r = bb(["bus", "note", "--to", "thr_definitelynotathread", "--body", "-"], "hi");
+    // No body flag at all, deliberately. This case carried `--body -` and so measured the
+    // FLAG refusal instead of the ADDRESS one: argv is parsed before the address is
+    // resolved, so the first refusal on the path is the only one anything sees, and the
+    // assertion a test writes is not necessarily the property it checks.
+    const r = bb(["bus", "note", "--to", "thr_definitelynotathread"]);
     strictEqual(r.rc, 1);
     match(r.stderr, /not a thread bb knows/);
   });
