@@ -202,10 +202,15 @@ suite("a real bb, two real threads", () => {
     // This is the arm that was missing, and its absence is why `--body -` shipped: the
     // cap test passed at rc 0 because the body was EMPTY, which reads identically to a
     // cap that never needed to fire. Assert the round trip, not the status.
+    // TO B, NOT TO ME. `note` is a queue kind, which never steers a live turn but DOES
+    // start an idle recipient — so addressing this to the thread running the suite left a
+    // queued message that woke it once the run finished. It woke this thread twice before
+    // anybody noticed the suite was the sender. B is disposable and deleted in teardown;
+    // the assertion is unchanged, because the body is read back out of the store either way.
     const f = join(tmpdir(), `bus-live-body-${process.pid}.txt`);
     const marker = `round-trip-${Date.now()}`;
     writeFileSync(f, marker);
-    const r = bb(["bus", "note", "--to", me, "--body-file", f]);
+    const r = bb(["bus", "note", "--to", b, "--body-file", f]);
     rmSync(f, { force: true });
     strictEqual(r.rc, 0, r.stderr);
     const seq = Number(/#(\d+)/.exec(r.stdout)![1]);
