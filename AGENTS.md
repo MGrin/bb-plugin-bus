@@ -42,13 +42,13 @@ the one a contributor reads first. The single fact that governs edits here:
   in, and `src/suite.test.ts` asserts that list against the directory — a suite file
   nothing runs is a test nobody has. **There is no second list of kinds**: adding one is a
   row in `src/kinds.ts` and a test.
-- **A body never comes from argv.** The shell substitutes before bb sees the command; the
-  CLI has no argv slot for one, and the 600-character cap is the schema, no override.
 - **Nothing here waits, blocks or polls.** Delivery is the bb server's job; a listener, a
   poller or a queue drain breaks the property the design rests on — that a session cannot
   silently go deaf.
-- **`queue` does not mean "wakes nobody".** bb has no delivery that leaves an idle thread
-  asleep; it means only that a live turn is not interrupted. README says why.
+- **Two facts about bb that constrain every change here** — a body can only come from
+  `--body-file` (bb forwards neither argv-safe prose nor stdin to a plugin CLI), and
+  `queue` still wakes an idle thread. Both are measured, with their incidents, in
+  [`README.md`](README.md); do not re-derive either from the code.
 
 **Nothing about who may merge, how agents are spawned, or how the maintainer's machine
 handles secrets belongs in this file, and none of it is stated here.** Those are properties
