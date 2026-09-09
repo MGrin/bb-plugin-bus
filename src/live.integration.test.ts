@@ -162,6 +162,17 @@ suite("a real bb, two real threads", () => {
     match(r.stdout, /^queued #\d+ report/m);
   });
 
+  it("a THREAD is claimable — teardown's own claim had been refused on every run", () => {
+    // The arm whose absence let `thread:` sit outside RESOURCE_PREFIXES. Teardown claims
+    // `thread:<id>` and ignores the rc, so the refusal was invisible: the delete went
+    // through anyway and nothing was worse for it. It stops being invisible when
+    // cc-guard's bus_claim_required lands, because that rule refuses the delete without a
+    // claim and has no override. Assert the STATUS, which teardown does not.
+    const r = bb(["bus", "claim", `thread:${b}`, "--reason", "live suite claimability arm"]);
+    strictEqual(r.rc, 0, `a thread must be claimable: ${r.stderr}`);
+    strictEqual(bb(["bus", "release", `thread:${b}`]).rc, 0);
+  });
+
   it("a second claim on a held resource returns rc 75 and names the holder", () => {
     const resource = `pr:${900000 + (Date.now() % 90000)}`;
     strictEqual(bb(["bus", "claim", resource, "--reason", "live suite"]).rc, 0);
