@@ -51,7 +51,8 @@ const SUGAR: readonly Command[] = KIND_NAMES
 
 export const COMMANDS: readonly Command[] = [...FIXED, ...SUGAR];
 
-export type BodySource = { kind: "stdin" } | { kind: "file"; path: string };
+/** A file, and only a file — see STDIN_DOES_NOT_REACH_THE_PLUGIN. */
+export type BodySource = { kind: "file"; path: string };
 
 export interface ParsedSend {
   kind: string;
@@ -76,11 +77,35 @@ const NO_ARGV_BODY =
   "bus: a message body never comes from argv — your shell substitutes backticks and " +
   "$(...) before bb sees it, which is how a bus message ran `git checkout main` on " +
   "2026-08-15.\n" +
-  "  the body comes from stdin or a file, never a word on the command line.\n" +
-  "  pipe it:  bb bus <verb> … --body -  <<'MSG'\n" +
-  "            …\n" +
-  "            MSG\n" +
-  "  or:       bb bus <verb> … --body-file <path>";
+  "  write it to a file with a QUOTED heredoc, then pass the path:\n" +
+  "    cat > /tmp/msg <<'MSG'\n" +
+  "    …\n" +
+  "    MSG\n" +
+  "    bb bus <verb> … --body-file /tmp/msg";
+
+/**
+ * `--body -` IS REFUSED BY NAME, and this is a defect it shipped with for one hour.
+ *
+ * bb NEVER FORWARDS STDIN TO A PLUGIN CLI. `PluginCliContext` is exactly
+ * {cwd, threadId, projectId, signal}, and the plugin runs inside the bb SERVER, not in
+ * the process the human piped into — so `readFileSync(0)` read the server's fd 0 and got
+ * nothing. Measured 2026-09-09: `printf 'hello' | bb bus note --to me --body -` returned
+ * rc=0, printed `queued #5 note`, and stored a row with NO BODY.
+ *
+ * That is the worst shape available: every sender is told it worked. A missing feature is
+ * survivable, a silent empty one is not — so the flag does not merely stop working, it
+ * refuses by name and says why. Removing it without a refusal would leave every existing
+ * caller silently sending nothing.
+ */
+const STDIN_DOES_NOT_REACH_THE_PLUGIN =
+  "bus: --body - does not work and never did: bb does not forward stdin to a plugin CLI.\n" +
+  "  The plugin runs inside the bb SERVER, so it reads the server's stdin, not yours —\n" +
+  "  measured 2026-09-09, a piped body stored an EMPTY row at rc 0.\n" +
+  "  Use a file, which the plugin can read because it is on this machine:\n" +
+  "    cat > /tmp/msg <<'MSG'\n" +
+  "    …\n" +
+  "    MSG\n" +
+  "    bb bus <verb> … --body-file /tmp/msg";
 
 const blank = (): ParsedSend => ({
   kind: "", to: null, ref: null, fields: {}, bodySource: null, ackOf: null, error: null,
@@ -104,13 +129,7 @@ function walk(
 }
 
 function setBody(p: ParsedSend, flag: string, v: string): string | null {
-  if (flag === "--body") {
-    if (v !== "-") {
-      return `bus: --body takes only '-', which reads the body from stdin.\n${NO_ARGV_BODY}`;
-    }
-    p.bodySource = { kind: "stdin" };
-    return null;
-  }
+  if (flag === "--body") return STDIN_DOES_NOT_REACH_THE_PLUGIN;
   p.bodySource = { kind: "file", path: v };
   return null;
 }
@@ -183,7 +202,10 @@ export function parseLog(argv: readonly string[]): LogFilter | { error: string }
   const f: LogFilter = { limit: 20 };
   for (let i = 1; i < argv.length; i++) {
     const w = argv[i]!;
+    // The BARE flags. Treating every flag as taking a value made `bb bus log --json`
+    // refuse with "--json needs a value" — found by the live suite, which reads --json.
     if (w === "--unread") { f.unread = UNREAD_SELF; continue; }
+    if (w === "--json") continue;
     const v = argv[i + 1];
     if (v === undefined) return { error: `bus: ${w} needs a value` };
     i++;

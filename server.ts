@@ -45,12 +45,22 @@ const BUILD_STAMP: { rev: string | null; dirty: boolean | null; sourceDir: strin
 
 const nowIso = () => new Date().toISOString();
 
-/** The body, from stdin or a file — NEVER from argv. `cli.ts` refuses the third source. */
-function readBody(src: { kind: "stdin" } | { kind: "file"; path: string } | null): string | null {
-  if (!src) return null;
-  const raw = src.kind === "stdin" ? readFileSync(0, "utf8") : readFileSync(src.path, "utf8");
+/**
+ * The body, from a FILE — never from argv, and never from stdin, which bb does not
+ * forward to a plugin CLI (see cli.ts's STDIN_DOES_NOT_REACH_THE_PLUGIN).
+ *
+ * THROWS rather than returning null on an unreadable file. A body the caller ASKED for
+ * and did not get must not become a message sent without one: that is the shape that
+ * shipped for an hour and told every sender it had worked.
+ */
+function readBody(src: { kind: "file"; path: string } | null): string {
+  if (!src) return "";
+  const raw = readFileSync(src.path, "utf8");
   const t = raw.trim();
-  return t === "" ? null : t;
+  if (t === "") {
+    throw new Error(`--body-file ${src.path} is empty — a body that is nothing is not a body`);
+  }
+  return t;
 }
 
 export default async function plugin(bb: BbPluginApi) {
@@ -290,9 +300,12 @@ export default async function plugin(bb: BbPluginApi) {
               );
             }
 
-            let body: string | null;
-            try { body = readBody(p.bodySource); }
-            catch (e) { return fail(`bus: could not read the body: ${e instanceof Error ? e.message : String(e)}`); }
+            let body: string | null = null;
+            try {
+              body = p.bodySource ? readBody(p.bodySource) : null;
+            } catch (e) {
+              return fail(`bus: could not read the body: ${e instanceof Error ? e.message : String(e)}`);
+            }
 
             const v = validate({ kind: p.kind, to, ref: p.ref, fields: p.fields, body, ackOf: p.ackOf });
             if (!v.ok) return fail(v.error);

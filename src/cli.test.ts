@@ -46,16 +46,25 @@ test("a value containing = keeps everything after the FIRST one", () => {
 
 test("A BODY ON ARGV IS REFUSED — the 2026-08-15 double-quote incident is closed by the CLI", () => {
   const p = parseSend(["send", "--kind", "note", "--to", "thr_b", "hello there"]);
-  match(String(p.error), /--body -/);
-  match(String(p.error), /stdin/);
+  match(String(p.error), /--body-file/);
+  match(String(p.error), /2026-08-15/);
+  // The remedy must show the QUOTED heredoc: an unquoted one still substitutes, and
+  // that is the half of the incident a bare "use a file" would leave open.
+  match(String(p.error), /<<'MSG'/);
 });
 
-test("--body takes only '-'; --body with text is the same refusal", () => {
-  match(String(parseSend(["send", "--kind", "note", "--to", "thr_b", "--body", "hi"]).error), /stdin/);
-  strictEqual(parseSend(["send", "--kind", "note", "--to", "thr_b", "--body", "-"]).bodySource!.kind, "stdin");
+test("--body - IS REFUSED BY NAME — bb does not forward stdin to a plugin CLI", () => {
+  // It shipped for an hour and stored an EMPTY body at rc 0, telling the sender it
+  // worked. Removing it silently would leave every existing caller sending nothing, so
+  // it refuses and says why.
+  for (const v of ["-", "hi"]) {
+    const e = String(parseSend(["send", "--kind", "note", "--to", "thr_b", "--body", v]).error);
+    match(e, /does not forward stdin/);
+    match(e, /--body-file/);
+  }
 });
 
-test("--body-file names a path and is the other legal source", () => {
+test("--body-file names a path and is the ONLY body source", () => {
   const p = parseSend(["send", "--kind", "note", "--to", "thr_b", "--body-file", "/tmp/x"]);
   deepStrictEqual(p.bodySource, { kind: "file", path: "/tmp/x" });
 });
@@ -124,6 +133,16 @@ test("log --unread needs no other flag and carries no value", () => {
   const f = parseLog(["log", "--unread"]);
   ok(!("error" in f));
   strictEqual(f.unread, "SELF");
+});
+
+test("log --json is a BARE flag — treating every flag as valued broke it", () => {
+  // `bb bus log --json` refused with "--json needs a value"; found by the live suite,
+  // which reads --json to parse rows.
+  const f = parseLog(["log", "--json"]);
+  ok(!("error" in f), "error" in f ? f.error : "");
+  const g = parseLog(["log", "--to", "thr_b", "--json", "-n", "5"]);
+  ok(!("error" in g), "error" in g ? g.error : "");
+  strictEqual((g as { limit: number }).limit, 5);
 });
 
 test("claim defaults the ttl to 30m and requires a reason", () => {

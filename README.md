@@ -13,7 +13,7 @@ bb plugin install git:https://github.com/MGrin/bb-plugin-bus.git@main
 ## Usage
 
 ```sh
-bb bus send --kind <kind> --to <thread-id> [--ref <ref>] [--field k=v]… [--body - | --body-file <p>]
+bb bus send --kind <kind> --to <thread-id> [--ref <ref>] [--field k=v]… [--body-file <p>]
 bb bus <kind> --to <thread-id> …                 # one verb per kind; same validation
 bb bus claim <resource> --reason <r> [--ttl 30m] # held / busy (rc 75)
 bb bus heartbeat <resource> · release <resource> [--force --reason '<why>'] · claims [--stale] [--mine]
@@ -42,8 +42,15 @@ bb bus unanswered [--minutes N] · build
 validation and every refusal message are derived from it, so adding a kind is one row and a
 test — never a convention in a skill.
 
-The body is optional on every kind and **capped at 600 characters by the schema, with no
-override**. The cap it replaces was a hook, and it was overridden 3,603 times against 96
+The body is optional on every kind, comes from **`--body-file <path>` and nothing else**,
+and is **capped at 600 characters by the schema, with no override**.
+
+**`--body -` does not exist and refuses by name.** bb does not forward stdin to a plugin
+CLI — `PluginCliContext` is `{cwd, threadId, projectId, signal}` and the plugin runs inside
+the bb *server* — so a piped body read the server's fd 0 and arrived empty. It shipped that
+way for an hour on 2026-09-09, storing empty rows at rc 0 while telling every sender it had
+worked. The flag refuses rather than being silently absent, because removing it quietly
+would leave every existing caller sending nothing. The cap it replaces was a hook, and it was overridden 3,603 times against 96
 refusals. `note` is the only free-prose kind and the plugin reports its share so it can be
 watched shrinking.
 
