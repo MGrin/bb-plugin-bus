@@ -33,7 +33,7 @@
     "url": "git+https://github.com/MGrin/bb-plugin-bus.git"
   },
   "scripts": {
-    "test": "node --test --experimental-strip-types src/kinds.test.ts src/refs.test.ts src/envelope.test.ts src/store.test.ts src/claims.test.ts src/delivery.test.ts src/cli.test.ts",
+    "test": "node --test --experimental-strip-types src/kinds.test.ts src/refs.test.ts src/envelope.test.ts src/store.test.ts src/claims.test.ts src/delivery.test.ts src/cli.test.ts src/suite.test.ts",
     "test:live": "node --test --experimental-strip-types src/live.integration.test.ts",
     "typecheck": "tsc --noEmit"
   }
