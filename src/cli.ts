@@ -56,7 +56,16 @@ export type BodySource = { kind: "file"; path: string };
 
 export interface ParsedSend {
   kind: string;
-  to: string | null;
+  /**
+   * EVERY `--to`, in the order given — not the last one. It was a scalar, so
+   * `--to A --to B --to C` assigned three times and delivered to C at rc 0, printing
+   * `queued #N note -> C`, which reads as a correct receipt rather than as two recipients
+   * dropped. MX-852. `--to` is mandatory on this bus precisely because an ambient send
+   * wakes nobody, and the announcement ritual — MERGING, FILING, SAVING — is a
+   * multi-recipient send by construction, so the flag that silently dropped recipients
+   * defeated the one guarantee announcing provides.
+   */
+  to: string[];
   ref: string | null;
   fields: Record<string, string>;
   bodySource: BodySource | null;
@@ -108,7 +117,7 @@ const STDIN_DOES_NOT_REACH_THE_PLUGIN =
   "    bb bus <verb> … --body-file /tmp/msg";
 
 const blank = (): ParsedSend => ({
-  kind: "", to: null, ref: null, fields: {}, bodySource: null, ackOf: null, error: null,
+  kind: "", to: [], ref: null, fields: {}, bodySource: null, ackOf: null, error: null,
 });
 
 /** Pull `--flag value` pairs; anything positional after the verb is the argv-body error. */
@@ -139,7 +148,7 @@ export function parseSend(argv: readonly string[]): ParsedSend {
   p.error = walk(argv, (flag, v) => {
     switch (flag) {
       case "--kind": p.kind = v; return null;
-      case "--to": p.to = v; return null;
+      case "--to": p.to.push(v); return null;
       case "--ref": p.ref = v; return null;
       case "--ack-of": {
         const n = Number(v);
@@ -159,7 +168,10 @@ export function parseSend(argv: readonly string[]): ParsedSend {
   });
   if (p.error) return p;
   if (!p.kind) p.error = "bus: send needs --kind <kind>";
-  else if (!p.to) p.error = "bus: send needs --to <thread-id> — there is no ambient send";
+  // `.length === 0`, NOT `!p.to`: an empty array is TRUTHY, so the truthiness check this
+  // replaced silently stopped firing the moment `to` became a list — the same shape as
+  // the defect being fixed, caught by the test that asserts a missing --to is refused.
+  else if (p.to.length === 0) p.error = "bus: send needs --to <thread-id> — there is no ambient send";
   return p;
 }
 
@@ -175,7 +187,7 @@ export function parseSugar(verb: string, argv: readonly string[]): ParsedSend {
   const p = blank();
   p.kind = verb;
   p.error = walk(argv, (flag, v) => {
-    if (flag === "--to") { p.to = v; return null; }
+    if (flag === "--to") { p.to.push(v); return null; }
     if (flag === "--ref") { p.ref = v; return null; }
     if (flag === "--body" || flag === "--body-file") return setBody(p, flag, v);
     if (!allowed.has(flag)) {

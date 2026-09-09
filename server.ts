@@ -283,21 +283,39 @@ export default async function plugin(bb: BbPluginApi) {
             // `ack` derives its recipient from the row it acks: the sender of a question
             // is the only correct answer, and making a human retype it is how an ack goes
             // to the wrong thread and the question stays open.
-            let to = p.to;
+            let tos = p.to;
             if (p.kind === "ack" && p.ackOf !== null) {
               const target = store.getMessage(p.ackOf);
               if (!target) return fail(`bus: no message #${p.ackOf} to ack`);
-              if (to && to !== target.from_thread) {
-                return fail(`bus: #${p.ackOf} came from ${target.from_thread}, not ${to} — an ack goes back to the asker`);
+              if (tos.length > 1) {
+                return fail(`bus: an ack goes back to ONE asker — #${p.ackOf} came from ${target.from_thread}`);
               }
-              to = target.from_thread;
+              if (tos[0] && tos[0] !== target.from_thread) {
+                return fail(`bus: #${p.ackOf} came from ${target.from_thread}, not ${tos[0]} — an ack goes back to the asker`);
+              }
+              tos = [target.from_thread];
             }
-            if (!to) return fail(`bus: ${p.kind} needs --to <thread-id>`);
-            if (!(await knownThread(to))) {
-              return fail(
-                `bus: '${to}' is not a thread bb knows — refusing rather than delivering to a stranger.\n` +
-                `  a typo used to report 'woke 1/1' and the wrong thread answered politely.`,
-              );
+            if (tos.length === 0) return fail(`bus: ${p.kind} needs --to <thread-id>`);
+
+            // EVERY ADDRESS IS CHECKED BEFORE ANYTHING IS STORED. Validating inside the
+            // fan-out loop would deliver to the recipients before the bad one and refuse
+            // after — a partial send reported as a failure, which is the worst of the
+            // three outcomes because the sender cannot tell what arrived. MX-852.
+            const seen = new Set<string>();
+            const recipients: string[] = [];
+            for (const t of tos) {
+              // A repeat is dropped rather than refused: `--to A --to A` plainly means one
+              // message to A, and two identical envelopes would each demand their own ack.
+              if (seen.has(t)) continue;
+              seen.add(t);
+              if (!(await knownThread(t))) {
+                return fail(
+                  `bus: '${t}' is not a thread bb knows — refusing rather than delivering to a stranger.\n` +
+                  `  a typo used to report 'woke 1/1' and the wrong thread answered politely.\n` +
+                  `  NOTHING was sent: every --to is checked before any is delivered.`,
+                );
+              }
+              recipients.push(t);
             }
 
             let body: string | null = null;
@@ -307,15 +325,29 @@ export default async function plugin(bb: BbPluginApi) {
               return fail(`bus: could not read the body: ${e instanceof Error ? e.message : String(e)}`);
             }
 
-            const v = validate({ kind: p.kind, to, ref: p.ref, fields: p.fields, body, ackOf: p.ackOf });
-            if (!v.ok) return fail(v.error);
+            // Validate the envelope ONCE, against the first recipient. Every field the
+            // schema checks is recipient-independent, so validating per recipient would
+            // report the same refusal N times.
+            const first = validate({ kind: p.kind, to: recipients[0]!, ref: p.ref, fields: p.fields, body, ackOf: p.ackOf });
+            if (!first.ok) return fail(first.error);
 
-            const { seq, outcome } = await post(mine, v.envelope);
+            // ONE ENVELOPE PER RECIPIENT — the store's `to_addr` is a scalar, so a message
+            // to four threads is four rows, four deliveries and four acks owed. That is
+            // what the sender meant and what `bb bus unanswered` must be able to count.
+            const parts: ReturnType<typeof receipt>[] = [];
+            for (const t of recipients) {
+              const v = t === recipients[0] ? first : validate({ kind: p.kind, to: t, ref: p.ref, fields: p.fields, body, ackOf: p.ackOf });
+              if (!v.ok) return fail(v.error);
+              const { seq, outcome } = await post(mine, v.envelope);
+              parts.push(receipt({ seq, kind: v.envelope.kind, to: t, outcome, ackRequired: v.envelope.ackRequired }));
+            }
             markRead();
-            const r = receipt({ seq, kind: v.envelope.kind, to, outcome, ackRequired: v.envelope.ackRequired });
-            return r.stderr
-              ? { exitCode: r.exitCode, stdout: r.stdout, stderr: r.stderr }
-              : { exitCode: r.exitCode, stdout: r.stdout };
+            // The receipt names EVERY recipient. A one-line receipt for a four-way send is
+            // how three dropped recipients read as success in the first place.
+            const stdout = parts.map((r) => r.stdout).join("\n");
+            const stderr = parts.map((r) => r.stderr).filter(Boolean).join("\n");
+            const exitCode = parts.some((r) => r.exitCode !== 0) ? 1 : 0;
+            return stderr ? { exitCode, stdout, stderr } : { exitCode, stdout };
           }
         }
       } catch (e) {
