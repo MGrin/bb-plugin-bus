@@ -20,6 +20,7 @@ import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
 import { deepStrictEqual, match, ok, strictEqual } from "node:assert/strict";
 import { KIND_NAMES } from "./kinds.ts";
+import { RESOURCE_PREFIXES } from "./refs.ts";
 
 interface Run { rc: number; stdout: string; stderr: string }
 
@@ -240,5 +241,17 @@ suite("a real bb, two real threads", () => {
     const md = readFileSync(new URL("../skills/bus/SKILL.md", import.meta.url), "utf8");
     const listed = [...md.matchAll(/^\| `([a-z-]+)` \|/gm)].map((m) => m[1]!);
     deepStrictEqual(listed, [...KIND_NAMES]);
+  });
+
+  it("THE SKILL'S RESOURCE LIST MATCHES THE CODE — the same drift, one line lower", () => {
+    // The kind table was checked and this line was not, so when `thread:` was added to
+    // RESOURCE_PREFIXES the skill went on listing five of six and nothing went red. A
+    // reader who trusts it does not claim a thread before deleting one, which is exactly
+    // the act cc-guard's bus_claim_required will refuse. Same failure, one line lower.
+    const md = readFileSync(new URL("../skills/bus/SKILL.md", import.meta.url), "utf8");
+    const line = /^Resources are (.+)$/m.exec(md);
+    ok(line, "the skill must state the resource vocabulary");
+    const listed = [...line[1]!.matchAll(/`([a-z]+):/g)].map((m) => `${m[1]!}:`);
+    deepStrictEqual(listed.sort(), [...RESOURCE_PREFIXES].sort());
   });
 });
