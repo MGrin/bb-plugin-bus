@@ -18,7 +18,6 @@
   },
   "include": [
     "server.ts",
-    "lib.ts",
-    "lib.test.ts"
+    "src/**/*.ts"
   ]
 }
