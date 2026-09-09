@@ -85,6 +85,8 @@ suite("a real bb, two real threads", () => {
   let a = "";
   let b = "";
   let project = "";
+  // Every ack-required message this suite sends, so teardown can close it. See `after`.
+  const ackDebt: number[] = [];
 
   before(() => {
     ok(me, "BB_THREAD_ID must be set — this suite runs from inside a bb thread");
@@ -112,6 +114,19 @@ suite("a real bb, two real threads", () => {
   });
 
   after(() => {
+    // ACK WHAT THIS SUITE ASKED, BEFORE DELETING WHO WOULD HAVE ANSWERED. An ack-required
+    // kind sent to a thread that is then deleted can never be answered by anybody, so it
+    // sits in `bb bus unanswered` forever and every future run adds another. Three such
+    // rows were already there when this was found — #55, #58 and #69, all handoffs from
+    // this suite to threads it had since deleted. The debris is not cosmetic: `unanswered`
+    // is the one instrument that says which questions are still open, and a reading nobody
+    // can act on is how an instrument stops being read.
+    //
+    // The ack goes back to the ASKER, which is this thread — so this is the suite closing
+    // its own question, and the answer says exactly that rather than pretending to be B.
+    for (const seq of ackDebt) {
+      bb(["bus", "ack", "--ack-of", String(seq), "--answer", "live suite teardown"]);
+    }
     // A LEAKED TEST THREAD READS ON THE BOARD AS A WORKER NOBODY BRIEFED. This runs even
     // on failure, and each id is claimed first because the guard refuses a delete without
     // one — the suite must go through the same gate as everyone else.
@@ -132,6 +147,7 @@ suite("a real bb, two real threads", () => {
     match(r.stdout, /^sent #\d+ handoff/m);
     match(r.stdout, /unanswered/);
     const seq = Number(/#(\d+)/.exec(r.stdout)![1]);
+    ackDebt.push(seq);
     until("the handoff row is stamped delivered", () =>
       rows(["bus", "log", "--to", b]).some(
         (m) => m.seq === seq && m.delivered_ts !== null));
