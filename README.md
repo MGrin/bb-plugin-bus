@@ -78,10 +78,17 @@ next claimant and **the displaced holder is told** — an expiry that only a led
 one the old holder acts against. Archiving or deleting a thread releases its claims, so a
 dead thread cannot hold `pr:685` forever.
 
-Enforcement lives in cc-guard, which reads this store read-only: before `gh pr merge <n>` the
-caller must hold `pr:<n>`, before `bb thread delete <id>` `thread:<id>`, before
-`bb memory forget <id>` `store:memory`, before a task cancel `task:<KEY>`. No override env
-var — the remedy is one command.
+Enforcement is SPECIFIED AND NOT YET DEPLOYED, and the difference is the whole point of
+saying so here. `bus_claim_required` reads this store read-only and refuses `gh pr merge
+<n>` without `pr:<n>`, `bb thread delete <id>` without `thread:<id>`, `bb memory forget
+<id>` without `store:memory`, and a task cancel without `task:<KEY>` — with no override env
+var. It is written up in the machine's `docs/guard/mx849-handoff.md` and lands on MX-812;
+the deployed cc-guard binary has no such rule, measured 2026-09-09.
+
+Until it does, the claim is arbitrated by this store alone: the first holder wins and a
+second claimant gets `busy` at rc 75. That is real. What is absent is the STOP — a session
+that never claims is not corrected by anything, which is exactly the failure mode a
+document asserting the refusal would hide.
 
 ## What `queue` mode does and does not buy
 
