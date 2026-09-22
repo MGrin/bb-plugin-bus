@@ -142,3 +142,15 @@ test("getClaim on an unknown resource is null, not undefined", () => {
   const { store } = fresh();
   strictEqual(store.getClaim("pr:999"), null);
 });
+
+test("MX-977: a claim keeps the spelling it was typed in beside its key", () => {
+  const { store } = fresh();
+  store.putClaim({ resource: "path:/r/dotfiles/.mx-gate", holder: "thr_a", reason: "x",
+    claimed_ts: "t", heartbeat_ts: "t", expires_ts: "u", released_ts: null, released_by: null,
+    stale: 0, spelled: "path:dotfiles/.mx-gate" });
+  strictEqual(store.getClaim("path:/r/dotfiles/.mx-gate")!.spelled, "path:dotfiles/.mx-gate");
+  // A row written before the key existed has no spelling, and its key IS what was typed.
+  store.putClaim({ resource: "pr:1", holder: "thr_a", reason: "x", claimed_ts: "t",
+    heartbeat_ts: "t", expires_ts: "u", released_ts: null, released_by: null, stale: 0 });
+  strictEqual(store.getClaim("pr:1")!.spelled, null);
+});

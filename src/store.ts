@@ -40,6 +40,9 @@ export interface ClaimRow {
   released_ts: string | null;
   released_by: string | null;
   stale: number;
+  /** The resource as the holder TYPED it. `resource` is the key (MX-977); null on a row
+   *  written before the key existed, whose key and spelling were the same string. */
+  spelled?: string | null;
 }
 
 export interface LogFilter {
@@ -82,6 +85,9 @@ export const MIGRATIONS = [
   `CREATE INDEX IF NOT EXISTS idx_messages_to_unread ON messages(to_addr, read_ts)`,
   `CREATE INDEX IF NOT EXISTS idx_messages_ref ON messages(ref)`,
   `CREATE INDEX IF NOT EXISTS idx_messages_ack_of ON messages(ack_of)`,
+  // MX-977: `resource` becomes the canonical key; the spelling is kept for readers that
+  // match on it (`mx gate` looks for `path:dotfiles/.mx-gate` by string).
+  `ALTER TABLE claims ADD COLUMN spelled TEXT`,
 ] as const;
 
 /**
@@ -175,10 +181,10 @@ export function createStore(db: Db): Store {
     putClaim(c) {
       db.prepare(
         `INSERT OR REPLACE INTO claims
-           (resource, holder, reason, claimed_ts, heartbeat_ts, expires_ts, released_ts, released_by, stale)
-         VALUES (?,?,?,?,?,?,?,?,?)`,
+           (resource, holder, reason, claimed_ts, heartbeat_ts, expires_ts, released_ts, released_by, stale, spelled)
+         VALUES (?,?,?,?,?,?,?,?,?,?)`,
       ).run(c.resource, c.holder, c.reason, c.claimed_ts, c.heartbeat_ts, c.expires_ts,
-            c.released_ts, c.released_by, c.stale);
+            c.released_ts, c.released_by, c.stale, c.spelled ?? null);
     },
 
     listClaims(f) {

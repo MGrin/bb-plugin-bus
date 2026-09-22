@@ -12,6 +12,7 @@ import { COMMANDS, UNREAD_SELF, parseClaim, parseLog, parseSend, parseSugar } fr
 import { KINDS, KIND_NAMES, isKind, schemaLine } from "./src/kinds.ts";
 import { renderEnvelope, validate, type Envelope } from "./src/envelope.ts";
 import { MIGRATIONS, createStore, type ClaimRow, type Db, type MessageRow } from "./src/store.ts";
+import { claimKey } from "./src/paths.ts";
 import { DEFAULT_TTL_MS, attemptClaim, heartbeat, parseTtl, release } from "./src/claims.ts";
 import { deliver, receipt, type Outcome } from "./src/delivery.ts";
 
@@ -120,11 +121,15 @@ export default async function plugin(bb: BbPluginApi) {
     `#${m.seq} ${m.created_ts} ${m.from_thread} -> ${m.to_addr} ` +
     renderEnvelope(m).replace(/^\[bus #\d+ /, "[").replace(/ from thr_\w+\]/, "]");
 
+  // The spelling a holder TYPED, for anything a human or a string-matcher reads (MX-977).
+  const shown = (c: ClaimRow): string => c.spelled ?? c.resource;
+
   const fmtClaim = (c: ClaimRow, now: Date): string => {
     const state = c.released_ts ? `released by ${c.released_by}`
       : now.getTime() >= Date.parse(c.expires_ts) ? `EXPIRED ${c.expires_ts}`
       : `held until ${c.expires_ts}`;
-    return `${c.resource}  ${c.holder}  ${state}  (${c.reason})`;
+    const key = shown(c) !== c.resource ? ` = ${c.resource}` : "";
+    return `${shown(c)}${key}  ${c.holder}  ${state}  (${c.reason})`;
   };
 
   bb.cli.register({
@@ -166,7 +171,12 @@ export default async function plugin(bb: BbPluginApi) {
               mine: argv.includes("--mine") ? mine : undefined,
             });
             markRead();
-            if (argv.includes("--json")) return { exitCode: 0, stdout: JSON.stringify(rows) };
+            // JSON keeps `resource` = the TYPED spelling, which is what readers match on
+            // (`mx gate`); the key it was held under is `key`.
+            if (argv.includes("--json")) {
+              return { exitCode: 0, stdout: JSON.stringify(rows.map(({ spelled, ...c }) =>
+                ({ ...c, resource: spelled ?? c.resource, key: c.resource }))) };
+            }
             return { exitCode: 0, stdout: rows.length ? rows.map((c) => fmtClaim(c, now)).join("\n") : "no claims" };
           }
 
@@ -178,8 +188,10 @@ export default async function plugin(bb: BbPluginApi) {
             if (!bad.ok) return fail(bad.error);
             const ttl = parseTtl(p.ttl);
             if ("error" in ttl) return fail(ttl.error);
+            const k = claimKey(p.resource, ctx.cwd ?? null);
+            if ("error" in k) return fail(k.error);
             const now = new Date();
-            const r = attemptClaim({ existing: store.getClaim(p.resource), resource: p.resource,
+            const r = attemptClaim({ existing: store.getClaim(k.key), resource: k.key,
               holder: mine, reason: p.reason, ttlMs: ttl.ms, now });
             if (r.kind === "busy") {
               // THE ONE WAKE A CLAIM CAUSES GOES TO THE HOLDER, not to the second
@@ -193,9 +205,11 @@ export default async function plugin(bb: BbPluginApi) {
               markRead();
               return { exitCode: 75,
                 stdout: `busy ${r.holder.holder} ${r.holder.reason} expires ${r.holder.expires_ts}`,
-                stderr: `bus: ${r.holder.holder} holds ${p.resource}. It was told you are waiting.` };
+                stderr: `bus: ${r.holder.holder} holds ${shown(r.holder)}` +
+                  (shown(r.holder) !== p.resource ? ` — the same file as ${p.resource} (${k.key})` : "") +
+                  `. It was told you are waiting.` };
             }
-            store.putClaim(r.row);
+            store.putClaim({ ...r.row, spelled: p.resource });
             if (r.tookFrom) {
               // The loss is DELIVERED, not merely logged — a stale takeover that only a
               // ledger records is a takeover the displaced holder acts against.
@@ -212,7 +226,9 @@ export default async function plugin(bb: BbPluginApi) {
           case "heartbeat": {
             const resource = argv[1];
             if (!resource) return fail("usage: bb bus heartbeat <resource>");
-            const existing = store.getClaim(resource);
+            const hk = claimKey(resource, ctx.cwd ?? null);
+            if ("error" in hk) return fail(hk.error);
+            const existing = store.getClaim(hk.key);
             // The original ttl, so a heartbeat extends by what was asked for rather than
             // silently resetting every claim to the default.
             const ttlMs = existing
@@ -231,7 +247,9 @@ export default async function plugin(bb: BbPluginApi) {
             const force = argv.includes("--force");
             const ri = argv.indexOf("--reason");
             const reason = ri >= 0 ? argv[ri + 1] ?? null : null;
-            const r = release({ existing: store.getClaim(resource), caller: mine, force, reason, now: new Date() });
+            const rk = claimKey(resource, ctx.cwd ?? null);
+            if ("error" in rk) return fail(rk.error);
+            const r = release({ existing: store.getClaim(rk.key), caller: mine, force, reason, now: new Date() });
             if ("error" in r) { markRead(); return fail(r.error); }
             store.putClaim(r.row);
             if (r.notifyHolder) {
