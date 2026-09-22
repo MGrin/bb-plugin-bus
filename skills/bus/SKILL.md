@@ -82,6 +82,14 @@ taken by the next claimant and **the displaced holder is told** — an expiry th
 ledger records is one the old holder acts against. Re-claiming what you hold is idempotent.
 Resources are `pr:n` `task:KEY` `branch:name` `path:glob` `thread:thr_x` `store:memory|tasks|bus`.
 
+**A `path:` claim is keyed by the FILE, not by what you typed.** A relative path is read
+from the root of the repo your shell stands in, and every git worktree of a repo maps to its
+main checkout. So `path:setup/phases`, `path:./setup/phases/` and the absolute path are one
+resource, two worktrees of one repo collide, and `path:README.md` in two different repos is
+two resources. A relative path from OUTSIDE a repo is refused — claim the absolute path.
+`claims` shows `<as typed> = <key>` when the two differ; `--json` keeps `resource` as typed
+and adds `key`.
+
 **Claim these four before you take them.** The store arbitrates today: the first holder
 wins and a second claimant gets `busy` at **rc 75**, which is real and enforced here.
 
