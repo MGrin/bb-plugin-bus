@@ -17,7 +17,7 @@
 
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, isAbsolute, join, normalize, relative, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, normalize, relative, resolve, sep } from "node:path";
 
 export interface Fs {
   exists(p: string): boolean;
@@ -77,6 +77,23 @@ export function claimKey(resource: string, cwd: string | null, fs: Fs = realFs):
         `or claim the absolute path.` };
     }
     abs = resolve(here, raw);
+    // THE DOUBLED REPO NAME (MX-1203). `path:dotfiles/setup/phases`, the spelling several
+    // briefs use for the deploy lock, is read from the repo root and resolves to
+    // `<repo>/dotfiles/setup/phases` — a directory that does not exist, and a DIFFERENT key
+    // from the `path:setup/phases` another thread claims for the same lock. Two correct-
+    // looking spellings of one lock that do not arbitrate is the failure a claim exists to
+    // prevent, and it is silent: both are admitted. Refused only when the first segment
+    // repeats the repo's own directory name AND the path is not there, so a repo that really
+    // holds a `dotfiles/` directory (this machine's does) keeps working.
+    const first = normalize(raw).split(sep)[0];
+    if (first === basename(here) && !fs.exists(abs)) {
+      const fixed = normalize(raw).split(sep).slice(1).join("/");
+      return { error:
+        `bus: '${resource}' starts with the repo's own name and ${abs} does not exist — a ` +
+        `relative path: claim is read from the repo root, so this is not the file you mean ` +
+        `and it is a different key from the one another thread claims (MX-1203). ` +
+        (fixed ? `Claim 'path:${fixed}' instead.` : `Claim the path inside the repo instead.`) };
+    }
   }
   if (abs.length > 1 && abs.endsWith(sep)) abs = abs.slice(0, -1);
 
