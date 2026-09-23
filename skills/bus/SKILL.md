@@ -87,6 +87,11 @@ from the root of the repo your shell stands in, and every git worktree of a repo
 main checkout. So `path:setup/phases`, `path:./setup/phases/` and the absolute path are one
 resource, two worktrees of one repo collide, and `path:README.md` in two different repos is
 two resources. A relative path from OUTSIDE a repo is refused — claim the absolute path.
+**Do not prefix the repo's own name**: `path:dotfiles/setup/phases` is read from the repo
+root, so it names `<repo>/dotfiles/setup/phases` — a different key from the
+`path:setup/phases` the next thread claims for the same lock. That shape is refused with the
+corrected spelling (MX-1203). The deploy lock is **`path:setup/phases`** and the full-gate
+lock is **`path:.mx-gate`**, both repo-relative and already repo-scoped by the key.
 `claims` shows `<as typed> = <key>` when the two differ; `--json` keeps `resource` as typed
 and adds `key`.
 
