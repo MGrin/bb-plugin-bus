@@ -68,3 +68,34 @@ test("a resource that is not a path is untouched", () => {
     strictEqual(key(r, null), r);
   }
 });
+
+// MX-1203: the doubled repo name. `path:dotfiles/setup/phases` from a dotfiles checkout is
+// read from the repo root, so it names `<repo>/dotfiles/setup/phases` — not the lock the
+// thread claiming `path:setup/phases` holds. Both were admitted, and neither arbitrated.
+test("MX-1203: a relative claim starting with the repo's own name is refused", () => {
+  const r = claimKey("path:dotfiles/setup/phases", "/h/dev/dotfiles/rust", fs);
+  ok("error" in r, `expected a refusal: ${JSON.stringify(r)}`);
+  match(r.error, /starts with the repo's own name/);
+  match(r.error, /Claim 'path:setup\/phases' instead/);
+});
+
+test("MX-1203: the falsifier — the two spellings would have been different keys", () => {
+  // The corrected spelling still keys the lock every thread means.
+  strictEqual(key("path:setup/phases", "/h/dev/dotfiles/rust"), "path:/h/dev/dotfiles/setup/phases");
+  // And the doubled one never reaches a key at all.
+  ok("error" in claimKey("path:dotfiles/setup/phases", "/h/dev/dotfiles", fs));
+});
+
+test("MX-1203: a repo that really holds that directory is untouched", () => {
+  // This machine's dotfiles repo has a real `dotfiles/` inside it: existing paths still key.
+  const withDir: Fs = { ...fs, exists: (p) => fs.exists(p) || p === "/h/dev/dotfiles/dotfiles/.claude" };
+  const r = claimKey("path:dotfiles/.claude", "/h/dev/dotfiles", withDir);
+  ok("key" in r, `expected a key: ${JSON.stringify(r)}`);
+  strictEqual(r.key, "path:/h/dev/dotfiles/dotfiles/.claude");
+});
+
+test("MX-1203: an absolute claim naming the same doubled path is untouched", () => {
+  // Only the RELATIVE reading is ambiguous; an absolute path says what it says.
+  strictEqual(key("path:/h/dev/dotfiles/dotfiles/setup/phases", "/h/dev/dotfiles"),
+              "path:/h/dev/dotfiles/dotfiles/setup/phases");
+});
