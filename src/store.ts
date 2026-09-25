@@ -115,8 +115,12 @@ export interface Store {
   getClaim(resource: string): ClaimRow | null;
   putClaim(c: ClaimRow): void;
   listClaims(f: { stale?: boolean; mine?: string }): ClaimRow[];
-  releaseClaimsHeldBy(thread: string, now: string): number;
+  releaseClaimsHeldBy(thread: string, now: string, cause: LifecycleCause): number;
 }
+
+/** Why a thread's claims were released without the thread asking (MX-1280). Never
+ *  `expiry`: a real TTL expiry leaves released_ts NULL and reads `EXPIRED <ts>`. */
+export type LifecycleCause = "thread-archived" | "thread-deleted";
 
 export function createStore(db: Db): Store {
   return {
@@ -197,15 +201,17 @@ export function createStore(db: Db): Store {
     },
 
     // A deleted or archived thread cannot hold pr:685 forever. Called from the two
-    // thread lifecycle events; `released_by` says `expiry` so the ledger shows it was
-    // not the holder's own decision.
-    releaseClaimsHeldBy(thread, now) {
+    // thread lifecycle events; `released_by` names the EVENT, so the ledger says why.
+    // It said `expiry` until MX-1280, and a live thread's 2h claim read `released by
+    // expiry` at 10.6 min — indistinguishable from a TTL that means nothing, when a
+    // real expiry never writes this column at all.
+    releaseClaimsHeldBy(thread, now, cause) {
       return db
         .prepare(
-          `UPDATE claims SET released_ts = ?, released_by = 'expiry'
+          `UPDATE claims SET released_ts = ?, released_by = ?
             WHERE holder = ? AND released_ts IS NULL`,
         )
-        .run(now, thread).changes;
+        .run(now, cause, thread).changes;
     },
   };
 }

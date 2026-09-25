@@ -154,3 +154,28 @@ test("MX-977: a claim keeps the spelling it was typed in beside its key", () => 
     heartbeat_ts: "t", expires_ts: "u", released_ts: null, released_by: null, stale: 0 });
   strictEqual(store.getClaim("pr:1")!.spelled, null);
 });
+
+// MX-1280: a TTL expiry never sets released_ts — `bb bus claims` shows `EXPIRED <ts>` for
+// that. So a row reading `released by expiry` could only have come from here, and a live
+// thread's 2h claim read exactly that at 10.6 min, and was taken for an advisory TTL. The
+// release names the lifecycle event that caused it, so the next one says what happened.
+test("MX-1280: a thread-lifecycle release names its cause, never 'expiry'", () => {
+  const { store } = fresh();
+  const row = (resource: string, holder: string) => ({ resource, holder, reason: "r",
+    claimed_ts: "t", heartbeat_ts: "t", expires_ts: "2099-01-01T00:00:00.000Z",
+    released_ts: null, released_by: null, stale: 0 });
+  store.putClaim(row("pr:1", "thr_a"));
+  store.putClaim(row("pr:2", "thr_a"));
+  store.putClaim(row("pr:3", "thr_b"));
+  store.putClaim({ ...row("pr:4", "thr_a"), released_ts: "earlier", released_by: "thr_a" });
+
+  strictEqual(store.releaseClaimsHeldBy("thr_a", "now", "thread-archived"), 2);
+  strictEqual(store.getClaim("pr:1")!.released_by, "thread-archived");
+  strictEqual(store.getClaim("pr:2")!.released_ts, "now");
+  strictEqual(store.getClaim("pr:3")!.released_ts, null, "another holder is untouched");
+  strictEqual(store.getClaim("pr:4")!.released_by, "thr_a", "an earlier release keeps its cause");
+
+  store.putClaim(row("pr:5", "thr_c"));
+  store.releaseClaimsHeldBy("thr_c", "now", "thread-deleted");
+  strictEqual(store.getClaim("pr:5")!.released_by, "thread-deleted");
+});
