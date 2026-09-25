@@ -71,11 +71,14 @@ export default async function plugin(bb: BbPluginApi) {
 
   // A DELETED OR ARCHIVED THREAD CANNOT HOLD pr:685 FOREVER. The old plugin dropped
   // room membership here; there is no membership now, and the thing that outlives a dead
-  // thread and blocks everybody else is a claim. `released_by = 'expiry'` so the ledger
-  // shows this was not the holder's own decision.
-  const dropThread = (threadId: string) => store.releaseClaimsHeldBy(threadId, nowIso());
-  bb.events.on("thread.archived", ({ thread }) => { dropThread(thread.id); });
-  bb.events.on("thread.deleted", ({ thread }) => { dropThread(thread.id); });
+  // thread and blocks everybody else is a claim. `released_by` names the event (MX-1280),
+  // so a live thread that loses its claims can see which lifecycle event took them.
+  bb.events.on("thread.archived", ({ thread }) => {
+    store.releaseClaimsHeldBy(thread.id, nowIso(), "thread-archived");
+  });
+  bb.events.on("thread.deleted", ({ thread }) => {
+    store.releaseClaimsHeldBy(thread.id, nowIso(), "thread-deleted");
+  });
 
   /**
    * ADDRESS VALIDATION, and it is a refusal rather than a warning.

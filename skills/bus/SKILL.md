@@ -80,6 +80,14 @@ bb bus claims [--stale] [--mine]
 First holder wins; default TTL 30 minutes, maximum 4 hours. Past expiry the resource is
 taken by the next claimant and **the displaced holder is told** — an expiry that only a
 ledger records is one the old holder acts against. Re-claiming what you hold is idempotent.
+
+**`bb bus claims` lists RELEASED and EXPIRED rows too — read the state column:**
+`held until <ts>` is live; `EXPIRED <ts>` is a TTL that ran out (the next claimant takes
+it); `released by <thread>` is a release, own or `--force`; `released by thread-archived`
+or `thread-deleted` means **the holder's thread was archived or deleted**, and every claim
+it held went with it. That last one is never a TTL: a live thread that sees it lost its
+claims to a lifecycle event, and should re-claim and say so (MX-1280 — it read `released
+by expiry` until then, and a 2h claim gone at 10.6 min was taken for an advisory TTL).
 Resources are `pr:n` `task:KEY` `branch:name` `path:glob` `thread:thr_x` `store:memory|tasks|bus`.
 
 **A `path:` claim is keyed by the FILE, not by what you typed.** A relative path is read
