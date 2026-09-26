@@ -18,6 +18,7 @@
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, normalize, relative, resolve, sep } from "node:path";
+import { prKey } from "./refs.ts";
 
 export interface Fs {
   exists(p: string): boolean;
@@ -61,6 +62,7 @@ function mainRoot(wt: string, fs: Fs): string {
 /** `resource` as the claim key. Non-`path:` resources are returned unchanged. */
 export function claimKey(resource: string, cwd: string | null, fs: Fs = realFs):
     { key: string } | { error: string } {
+  if (resource.startsWith("pr:")) return { key: prKey(resource) };
   if (!resource.startsWith("path:")) return { key: resource };
   let raw = resource.slice("path:".length);
   if (raw === "~" || raw.startsWith("~/")) raw = fs.home + raw.slice(1);

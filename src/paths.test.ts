@@ -99,3 +99,11 @@ test("MX-1203: an absolute claim naming the same doubled path is untouched", () 
   strictEqual(key("path:/h/dev/dotfiles/dotfiles/setup/phases", "/h/dev/dotfiles"),
               "path:/h/dev/dotfiles/dotfiles/setup/phases");
 });
+
+// MX-1312: claimKey is where the pr: spellings meet, so the collision is tested HERE too.
+test("claimKey folds both dotfiles pr: spellings into one key and keeps other repos apart", () => {
+  const k = (r: string) => (claimKey(r, null) as { key: string }).key;
+  strictEqual(k("pr:MGrin/dotfiles#27"), k("pr:27"));
+  strictEqual(k("pr:MGrin/bb-plugin-bus#27"), k("pr:mgrin/BB-plugin-bus#27"));
+  notStrictEqual(k("pr:MGrin/bb-plugin-bus#27"), k("pr:27"));
+});
