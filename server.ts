@@ -11,7 +11,7 @@ import { readFileSync } from "node:fs";
 import { COMMANDS, UNREAD_SELF, parseClaim, parseLog, parseSend, parseSugar } from "./src/cli.ts";
 import { KINDS, KIND_NAMES, isKind, schemaLine } from "./src/kinds.ts";
 import { renderEnvelope, validate, type Envelope } from "./src/envelope.ts";
-import { MIGRATIONS, createStore, type ClaimRow, type Db, type MessageRow } from "./src/store.ts";
+import { MIGRATIONS, createStore, type ClaimRow, type Db, type LifecycleCause, type MessageRow } from "./src/store.ts";
 import { claimKey } from "./src/paths.ts";
 import { DEFAULT_TTL_MS, attemptClaim, heartbeat, parseTtl, release } from "./src/claims.ts";
 import { deliver, receipt, type Outcome } from "./src/delivery.ts";
@@ -73,12 +73,37 @@ export default async function plugin(bb: BbPluginApi) {
   // room membership here; there is no membership now, and the thing that outlives a dead
   // thread and blocks everybody else is a claim. `released_by` names the event (MX-1280),
   // so a live thread that loses its claims can see which lifecycle event took them.
-  bb.events.on("thread.archived", ({ thread }) => {
-    store.releaseClaimsHeldBy(thread.id, nowIso(), "thread-archived");
-  });
-  bb.events.on("thread.deleted", ({ thread }) => {
-    store.releaseClaimsHeldBy(thread.id, nowIso(), "thread-deleted");
-  });
+  //
+  // AND ONLY WHEN bb CONFIRMS IT (MX-1280). On 2026-09-25T04:56:24Z this handler released
+  // the claims of two threads that were live, unarchived and mid-turn: bb.db holds no
+  // archive or delete for either, so the event fired for a thread that had not changed.
+  // The emitter is bb's and not ours to read, so the release now re-reads the thread and
+  // acts only when its record says archived or deleted. When the read fails the claims
+  // are KEPT: a kept claim still dies at its TTL, while an early release is the silent
+  // double-take this ledger exists to prevent.
+  const releaseIfGone = async (id: string, cause: LifecycleCause) => {
+    let gone: boolean;
+    try {
+      const t = await bb.sdk.threads.get({ threadId: id });
+      gone = cause === "thread-archived" ? t.archivedAt != null : t.deletedAt != null;
+    } catch (err) {
+      // bb REMOVES a deleted thread (bb.db keeps no deleted_at rows), so after a delete the
+      // re-read is `HTTP 404: Thread not found` -- which is the confirmation, not a failure.
+      if (/\b404\b|not found/i.test(String(err))) {
+        gone = true;
+      } else {
+        bb.log.warn(`${cause} for ${id}: could not re-read the thread, so its claims are kept until their TTL (${String(err)})`);
+        return;
+      }
+    }
+    if (!gone) {
+      bb.log.warn(`${cause} for ${id}, but bb says the thread is not ${cause.slice(7)}: its claims are kept (MX-1280)`);
+      return;
+    }
+    store.releaseClaimsHeldBy(id, nowIso(), cause);
+  };
+  bb.events.on("thread.archived", ({ thread }) => releaseIfGone(thread.id, "thread-archived"));
+  bb.events.on("thread.deleted", ({ thread }) => releaseIfGone(thread.id, "thread-deleted"));
 
   /**
    * ADDRESS VALIDATION, and it is a refusal rather than a warning.
