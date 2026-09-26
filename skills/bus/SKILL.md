@@ -41,7 +41,7 @@ bb bus ack --ack-of 412 --answer 'merged, go'          # --to is derived from #4
 fields replaces the 1,879-character median the old bus carried; if you are reaching for
 `note`, look for the kind that has a field for the fact you are about to write out.
 
-`ref` is one of `task:MX-n` `pr:n` `path:p` `store:memory|tasks|bus`.
+`ref` is one of `task:MX-n` `pr:n` `pr:owner/repo#n` `path:p` `store:memory|tasks|bus`.
 
 ## The body comes from a FILE
 
@@ -88,7 +88,12 @@ or `thread-deleted` means **the holder's thread was archived or deleted**, and e
 it held went with it. That last one is never a TTL: a live thread that sees it lost its
 claims to a lifecycle event, and should re-claim and say so (MX-1280 — it read `released
 by expiry` until then, and a 2h claim gone at 10.6 min was taken for an advisory TTL).
-Resources are `pr:n` `task:KEY` `branch:name` `path:glob` `thread:thr_x` `store:memory|tasks|bus`.
+Resources are `pr:n` `pr:owner/repo#n` `task:KEY` `branch:name` `path:glob` `thread:thr_x` `store:memory|tasks|bus`.
+
+**A bare `pr:n` is a MGrin/dotfiles PR. Any other repo is `pr:<owner>/<repo>#<n>`**, e.g.
+`bb bus claim 'pr:MGrin/bb-plugin-bus#27'` (quote it: an unquoted `#` is a comment or a glob operator in some shells).
+`pr:MGrin/dotfiles#27` and `pr:27` are ONE claim, and owner/repo compare case-insensitively
+(MX-1312 — `pr:bb-plugin-bus-27` was refused and the merge went ahead unclaimed).
 
 **A `path:` claim is keyed by the FILE, not by what you typed.** A relative path is read
 from the root of the repo your shell stands in, and every git worktree of a repo maps to its
@@ -114,7 +119,8 @@ skips it gets no warning. Flip this paragraph when MX-812 deploys.
 
 | before | you hold |
 |---|---|
-| `gh pr merge <n>` | `pr:<n>` |
+| `gh pr merge <n>` (dotfiles) | `pr:<n>` |
+| `gh pr merge <n> -R <owner>/<repo>` | `pr:<owner>/<repo>#<n>` |
 | `bb thread delete <id>` | `thread:<id>` |
 | `bb memory forget <id>` | `store:memory` |
 | `bb tasks update … --status canceled` | `task:<KEY>` |

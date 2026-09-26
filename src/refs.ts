@@ -21,6 +21,24 @@ export const RESOURCE_PREFIXES =
 
 const STORES = ["memory", "tasks", "bus"] as const;
 
+// A PR IN ANOTHER REPO (MX-1312). A bare `pr:<n>` carries no repo, so it could only ever
+// mean dotfiles, and a plugin repo's PR could not be claimed before its merge at all
+// (`pr:bb-plugin-bus-27` was refused, and the merge went ahead unclaimed).
+const REPO_PR = /^([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)#(\d+)$/;
+
+// The repo a bare `pr:<n>` has always meant, so both spellings of one dotfiles PR are ONE
+// key: two threads merging the same PR under different spellings must collide.
+const BARE_PR_REPO = "mgrin/dotfiles";
+
+/** The claim key of a `pr:` resource: `owner/repo` lower-cased (GitHub compares it
+ *  case-insensitively), and a dotfiles PR in its bare `pr:<n>` form. */
+export function prKey(resource: string): string {
+  const m = REPO_PR.exec(resource.slice("pr:".length));
+  if (!m) return resource;
+  const repo = m[1].toLowerCase();
+  return repo === BARE_PR_REPO ? `pr:${m[2]}` : `pr:${repo}#${m[2]}`;
+}
+
 function check(value: string, prefixes: readonly string[], what: string): string | null {
   const prefix = prefixes.find((p) => value.startsWith(p));
   if (!prefix) {
@@ -29,8 +47,9 @@ function check(value: string, prefixes: readonly string[], what: string): string
   const rest = value.slice(prefix.length);
   if (!rest) return `bus: '${value}' has an empty ${what} after '${prefix}' — it names nothing`;
   // `pr:main` is the shape that addresses the wrong thing while looking right.
-  if (prefix === "pr:" && !/^\d+$/.test(rest)) {
-    return `bus: '${value}' — a pr: ${what} must be a number, got '${rest}'`;
+  if (prefix === "pr:" && !/^\d+$/.test(rest) && !REPO_PR.test(rest)) {
+    return `bus: '${value}' — a pr: ${what} is a number (a MGrin/dotfiles PR) or ` +
+      `<owner>/<repo>#<n>, got '${rest}'`;
   }
   if (prefix === "store:" && !(STORES as readonly string[]).includes(rest)) {
     return `bus: '${value}' — store: must be one of ${STORES.join("|")}`;

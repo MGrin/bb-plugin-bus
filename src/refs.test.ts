@@ -1,6 +1,6 @@
-import { match, strictEqual } from "node:assert/strict";
+import { match, notStrictEqual, strictEqual } from "node:assert/strict";
 import { test } from "node:test";
-import { validateRef, validateResource } from "./refs.ts";
+import { prKey, validateRef, validateResource } from "./refs.ts";
 
 test("a well-formed ref of every prefix is accepted", () => {
   for (const r of ["task:MX-838", "pr:685", "path:setup/lib/x.py", "thread:thr_abc123", "store:memory"]) {
@@ -48,4 +48,29 @@ test("thread: is CLAIMABLE — a thread delete is one of the four acts the proto
 test("pr: must be a number — pr:main is the shape that reached a stranger", () => {
   strictEqual(validateResource("pr:685"), null);
   match(String(validateResource("pr:main")), /number/);
+});
+
+// MX-1312: a PR in another repo is claimable, and every spelling of one PR is ONE key.
+test("pr:<owner>/<repo>#<n> is a claimable resource and a ref", () => {
+  strictEqual(validateResource("pr:MGrin/bb-plugin-bus#27"), null);
+  strictEqual(validateRef("pr:MGrin/bb-plugin-bus#27"), null);
+});
+
+test("a pr: that is neither a number nor owner/repo#n is still refused", () => {
+  for (const bad of ["pr:bb-plugin-bus-27", "pr:MGrin/bb-plugin-bus", "pr:MGrin/bb-plugin-bus#",
+                     "pr:bb-plugin-bus#27", "pr:MGrin/bb-plugin-bus#27x", "pr:a/b/c#1"]) {
+    match(String(validateResource(bad)), /number .*or <owner>\/<repo>#<n>/, bad);
+  }
+});
+
+test("prKey: a dotfiles PR in either spelling is the bare key", () => {
+  strictEqual(prKey("pr:685"), "pr:685");
+  strictEqual(prKey("pr:MGrin/dotfiles#685"), "pr:685");
+  strictEqual(prKey("pr:mgrin/DOTFILES#685"), "pr:685");
+});
+
+test("prKey: another repo keeps its repo, lower-cased, and differs from a same-number dotfiles PR", () => {
+  strictEqual(prKey("pr:MGrin/bb-plugin-bus#27"), "pr:mgrin/bb-plugin-bus#27");
+  strictEqual(prKey("pr:mgrin/BB-PLUGIN-BUS#27"), "pr:mgrin/bb-plugin-bus#27");
+  notStrictEqual(prKey("pr:MGrin/bb-plugin-bus#27"), prKey("pr:27"));
 });
