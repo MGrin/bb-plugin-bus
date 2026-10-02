@@ -217,3 +217,59 @@ test("--wait on a FREE resource with nobody waiting is held at once, rc 0", asyn
   assert.equal(r.exitCode, 0);
   assert.match(r.stdout, /^held /);
 });
+
+// ── MX-1394: no renewal while anyone waits ─────────────────────────────────────────────
+
+test("MX-1394: a heartbeat on a claim somebody waits for is refused rc 75, naming the waiter", async () => {
+  const h = await host();
+  await h.as(A)("claim", R, "--reason", "a");
+  const before = h.store.getClaim(R)!.expires_ts;
+  await h.as(B)("claim", R, "--reason", "b", "--wait");
+  const hb = await h.as(A)("heartbeat", R);
+  assert.equal(hb.exitCode, 75);
+  assert.match(hb.stderr, new RegExp(`1 waiting .*1\\. ${B} since`));
+  assert.equal(h.store.getClaim(R)!.expires_ts, before, "the expiry did not move");
+});
+
+test("MX-1394 CONTROL: with nobody waiting a heartbeat extends, as before", async () => {
+  const h = await host();
+  await h.as(A)("claim", R, "--reason", "a");
+  const before = h.store.getClaim(R)!.heartbeat_ts;
+  await new Promise((r) => setTimeout(r, 5));
+  const hb = await h.as(A)("heartbeat", R);
+  assert.equal(hb.exitCode, 0);
+  assert.notEqual(h.store.getClaim(R)!.heartbeat_ts, before);
+});
+
+test("MX-1394: a holder's re-claim is a renewal too, and refused while anyone waits", async () => {
+  const h = await host();
+  await h.as(A)("claim", R, "--reason", "a", "--ttl", "30m");
+  const before = h.store.getClaim(R)!.expires_ts;
+  await h.as(B)("claim", R, "--reason", "b", "--wait");
+  const re = await h.as(A)("claim", R, "--reason", "a", "--ttl", "4h");
+  assert.equal(re.exitCode, 75);
+  assert.match(re.stderr, /not renewed/);
+  assert.equal(h.store.getClaim(R)!.expires_ts, before);
+});
+
+test("MX-1394 CONTROL: with nobody waiting a holder's re-claim is idempotent, as before", async () => {
+  const h = await host();
+  await h.as(A)("claim", R, "--reason", "a");
+  assert.equal((await h.as(A)("claim", R, "--reason", "a", "--ttl", "2h")).exitCode, 0);
+});
+
+test("MX-1394: a granted waiter may still CONFIRM its pickup while others wait — once", async () => {
+  const h = await host();
+  await h.as(A)("claim", R, "--reason", "a");
+  await h.as(B)("claim", R, "--reason", "b", "--wait", "--ttl", "1h");
+  await h.as(C)("claim", R, "--reason", "c", "--wait");
+  await h.as(A)("release", R);
+  assert.equal(h.store.getClaim(R)!.pickup, 1);
+  const hb = await h.as(B)("heartbeat", R);
+  assert.equal(hb.exitCode, 75, "a heartbeat cannot stretch a pickup");
+  const ok1 = await h.as(B)("claim", R, "--reason", "b", "--ttl", "1h");
+  assert.equal(ok1.exitCode, 0);
+  assert.equal(h.store.getClaim(R)!.pickup, 0);
+  const again = await h.as(B)("claim", R, "--reason", "b", "--ttl", "4h");
+  assert.equal(again.exitCode, 75, "the confirm is the only renewal");
+});

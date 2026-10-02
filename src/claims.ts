@@ -175,7 +175,7 @@ export function settle(a: {
     resource: head.resource, holder: head.waiter, reason: head.reason,
     claimed_ts: iso, heartbeat_ts: iso,
     expires_ts: new Date(a.now.getTime() + Math.min(head.ttl_ms, GRANT_PICKUP_MS)).toISOString(),
-    released_ts: null, released_by: null, stale: 0, spelled: head.spelled,
+    released_ts: null, released_by: null, stale: 0, spelled: head.spelled, pickup: 1,
   };
   const tookFrom = a.existing && a.existing.released_ts === null ? a.existing.holder : null;
   return { grant: head, row, tookFrom };
@@ -201,4 +201,32 @@ export function joinWaitList(a: {
     expires_ts: new Date(a.now.getTime() + a.maxWaitMs).toISOString(),
   };
   return { row, position: queue.length + 1, joined: true };
+}
+
+/**
+ * NO RENEWAL WHILE ANYONE WAITS (MX-1394). A contended claim is held for the ttl its holder
+ * asked for and no longer: on 2026-10-02T15:16Z a 3-hour claim sat on box-cpu-hog with its
+ * thread reading idle while a 15-minute run waited, and a heartbeat or a re-claim is how a
+ * hold like that is extended. Both are refused while the list is non-empty.
+ *
+ * The ONE exception is a grant's pickup: the waiter re-claiming to take its own ttl is not a
+ * renewal, it is the claim it queued for. With nobody waiting this returns null, which is the
+ * bus as it was.
+ */
+export function renewalRefused(a: {
+  existing: ClaimRow | null;
+  waiters: readonly WaiterRow[];
+  caller: string;
+  /** A re-claim may confirm a pickup; a heartbeat never can. */
+  confirming: boolean;
+  now: Date;
+}): string | null {
+  if (!a.existing || a.existing.holder !== a.caller || !live(a.existing, a.now)) return null;
+  if (a.confirming && a.existing.pickup === 1) return null;
+  const q = a.waiters.filter((w) => waiting(w, a.now));
+  if (!q.length) return null;
+  const who = q.map((w, i) => `${i + 1}. ${w.waiter} since ${w.joined_ts}`).join(", ");
+  return `bus: ${q.length} waiting for ${a.existing.spelled ?? a.existing.resource} (${who}), so it is not ` +
+    `renewed — a contended claim lasts the ttl you asked for, until ${a.existing.expires_ts}. ` +
+    `Finish and release it: bb bus release ${a.existing.spelled ?? a.existing.resource}`;
 }

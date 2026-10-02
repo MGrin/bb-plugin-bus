@@ -88,6 +88,11 @@ ttl, or `bb bus release` it. Nobody can jump the list — a plain claim on a slo
 is `busy` to the head. Re-running `--wait` keeps your first place. You leave the list with
 `bb bus release <r>`, at `--max-wait` (default 2h, max 4h), or when your thread is archived.
 
+**No renewal while anyone waits** (MX-1394). With a non-empty wait list, the holder's
+`heartbeat` AND its re-claim are refused at rc 75, naming the waiters: a contended claim
+lasts the ttl you asked for. **Size `--ttl` to the run up front.** The one renewal allowed is
+a granted waiter confirming its 10-minute pickup. Nobody waiting = heartbeat as before.
+
 First holder wins; default TTL 30 minutes, maximum 4 hours. Past expiry the resource is
 taken by the next claimant and **the displaced holder is told** — an expiry that only a
 ledger records is one the old holder acts against. Re-claiming what you hold is idempotent.
