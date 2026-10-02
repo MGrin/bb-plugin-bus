@@ -13,7 +13,8 @@ import { KINDS, KIND_NAMES, isKind, schemaLine } from "./src/kinds.ts";
 import { renderEnvelope, validate, type Envelope } from "./src/envelope.ts";
 import { MIGRATIONS, createStore, type ClaimRow, type Db, type LifecycleCause, type MessageRow } from "./src/store.ts";
 import { claimKey } from "./src/paths.ts";
-import { DEFAULT_TTL_MS, attemptClaim, heartbeat, parseTtl, release } from "./src/claims.ts";
+import { DEFAULT_TTL_MS, GRANT_PICKUP_MS, attemptClaim, heartbeat, joinWaitList, parseTtl, release, settle,
+  type WaiterRow } from "./src/claims.ts";
 import { deliver, receipt, type Outcome } from "./src/delivery.ts";
 
 /**
@@ -100,10 +101,92 @@ export default async function plugin(bb: BbPluginApi) {
       bb.log.warn(`${cause} for ${id}, but bb says the thread is not ${cause.slice(7)}: its claims are kept (MX-1280)`);
       return;
     }
+    // A gone thread waits for nothing either (MX-1390): its wait-list rows go with it, and
+    // whatever it held passes to the head of that resource's list.
+    store.dropWaitersOf(id);
     store.releaseClaimsHeldBy(id, nowIso(), cause);
+    await sweep(null);
   };
   bb.events.on("thread.archived", ({ thread }) => releaseIfGone(thread.id, "thread-archived"));
   bb.events.on("thread.deleted", ({ thread }) => releaseIfGone(thread.id, "thread-deleted"));
+
+  // ── THE WAIT LIST (MX-1390) ──────────────────────────────────────────────────────
+  //
+  // `settle` is pure; this is where its answer is written and delivered. Every claim verb
+  // sweeps FIRST, so an expired claim with a waiter is the waiter's before anybody else
+  // can look at it — that, and not a check inside attemptClaim, is what stops a claimant
+  // jumping the list.
+  //
+  // THE ONE TIMER IN THIS PLUGIN. "Nothing here waits" is about delivery — a session that
+  // cannot go deaf. An expiry nobody touches would otherwise strand the head of the list
+  // until some unrelated thread happened to run `bb bus claims`, which is polling again by
+  // another name. So the server arms ONE timeout, for the earliest expiry among claims
+  // somebody waits on, and re-arms after every sweep. With an empty list it arms nothing.
+  type Granted = NonNullable<ReturnType<typeof settle>>;
+  const mins = (ms: number) => `${Math.round(ms / 60_000)}m`;
+
+  const announceGrant = async (from: string | null, g: Granted) => {
+    const w = g.grant;
+    // A timer grant has no caller; it is sent as from the holder whose claim lapsed, or
+    // else from the waiter itself. A waiter whose OWN claim settled it already has stdout.
+    const sender = from ?? g.tookFrom ?? w.waiter;
+    if (from !== w.waiter) {
+      const body = `You hold ${w.spelled} until ${g.row.expires_ts}, a ${mins(GRANT_PICKUP_MS)} pickup. ` +
+        `Take it for your ${mins(w.ttl_ms)}: bb bus claim ${w.spelled} --reason '${w.reason}' --ttl ${mins(w.ttl_ms)}. ` +
+        `Not needed any more: bb bus release ${w.spelled}`;
+      const e = validate({ kind: "claim", to: w.waiter, ref: null,
+        fields: { resource: w.spelled, ttl: mins(GRANT_PICKUP_MS), reason: `GRANTED to you from the wait list (${w.reason})` },
+        body, ackOf: null });
+      if (e.ok) await post(sender, e.envelope);
+    }
+    if (g.tookFrom && g.tookFrom !== w.waiter) {
+      const e = validate({ kind: "claim", to: g.tookFrom, ref: null,
+        fields: { resource: w.spelled, ttl: mins(GRANT_PICKUP_MS), reason: `your claim expired; granted to ${w.waiter} from the wait list` },
+        body: null, ackOf: null });
+      if (e.ok) await post(w.waiter, e.envelope);
+    }
+  };
+
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const arm = () => {
+    if (timer) clearTimeout(timer);
+    timer = null;
+    let next = Infinity;
+    for (const r of store.waitedResources()) {
+      const c = store.getClaim(r);
+      // A waited resource is always held after a sweep; the earliest of the two times a
+      // row can change hands — its claim's expiry, or a waiter's own --max-wait — wins.
+      if (c && c.released_ts === null) next = Math.min(next, Date.parse(c.expires_ts));
+      for (const w of store.waiters(r)) next = Math.min(next, Date.parse(w.expires_ts));
+    }
+    if (next === Infinity) return;
+    const delay = Math.min(Math.max(next - Date.now(), 0) + 250, 2 ** 31 - 1);
+    timer = setTimeout(() => { void sweep(null).catch((e) => bb.log.warn(`bus wait-list sweep: ${String(e)}`)); }, delay);
+    (timer as { unref?: () => void }).unref?.();
+  };
+
+  /** Settle every waited resource, write the grants, re-arm, THEN deliver. Returns grants. */
+  async function sweep(from: string | null): Promise<Granted[]> {
+    const now = new Date();
+    store.pruneWaiters(now.toISOString());
+    const grants: Granted[] = [];
+    for (const r of store.waitedResources()) {
+      const g = settle({ existing: store.getClaim(r), waiters: store.waiters(r), now });
+      if (!g) continue;
+      // Both writes before any await: delivery yields, and another verb must not see the
+      // slot free between them.
+      store.putClaim(g.row);
+      store.removeWaiter(r, g.grant.waiter);
+      grants.push(g);
+    }
+    arm();
+    for (const g of grants) await announceGrant(from, g);
+    return grants;
+  }
+  arm();
+
+  const fmtWaiter = (w: WaiterRow, i: number): string =>
+    `    waiting ${i + 1}. ${w.waiter} since ${w.joined_ts}  gives up ${w.expires_ts}  (${w.reason})`;
 
   /**
    * ADDRESS VALIDATION, and it is a refusal rather than a warning.
@@ -193,6 +276,7 @@ export default async function plugin(bb: BbPluginApi) {
       try {
         switch (cmd) {
           case "claims": {
+            await sweep(mine);
             const now = new Date();
             const rows = store.listClaims({
               stale: argv.includes("--stale") || undefined,
@@ -203,9 +287,12 @@ export default async function plugin(bb: BbPluginApi) {
             // (`mx gate`); the key it was held under is `key`.
             if (argv.includes("--json")) {
               return { exitCode: 0, stdout: JSON.stringify(rows.map(({ spelled, ...c }) =>
-                ({ ...c, resource: spelled ?? c.resource, key: c.resource }))) };
+                ({ ...c, resource: spelled ?? c.resource, key: c.resource,
+                   waiters: store.waiters(c.resource).map(({ resource: _r, ...w }) => w) }))) };
             }
-            return { exitCode: 0, stdout: rows.length ? rows.map((c) => fmtClaim(c, now)).join("\n") : "no claims" };
+            return { exitCode: 0, stdout: rows.length
+              ? rows.map((c) => [fmtClaim(c, now), ...store.waiters(c.resource).map(fmtWaiter)].join("\n")).join("\n")
+              : "no claims" };
           }
 
           case "claim": {
@@ -218,9 +305,32 @@ export default async function plugin(bb: BbPluginApi) {
             if ("error" in ttl) return fail(ttl.error);
             const k = claimKey(p.resource, ctx.cwd ?? null);
             if ("error" in k) return fail(k.error);
+            const maxWait = parseTtl(p.maxWait);
+            if ("error" in maxWait) return fail(`--max-wait: ${maxWait.error}`);
+            await sweep(mine);
             const now = new Date();
             const r = attemptClaim({ existing: store.getClaim(k.key), resource: k.key,
               holder: mine, reason: p.reason, ttlMs: ttl.ms, now });
+            if (r.kind === "busy" && p.wait) {
+              const j = joinWaitList({ waiters: store.waiters(k.key), resource: k.key, spelled: p.resource,
+                waiter: mine, reason: p.reason, ttlMs: ttl.ms, maxWaitMs: maxWait.ms, now });
+              if (j.joined) {
+                store.addWaiter(j.row);
+                arm();
+                // The holder is told ONCE, on joining — a re-run of the same --wait keeps
+                // its place and wakes nobody (mem_cf8vtxd3xz4: a polled claim spams them).
+                const e = validate({ kind: "claim", to: r.holder.holder, ref: null,
+                  fields: { resource: p.resource, ttl: p.ttl, reason: `waiting #${j.position}: ${p.reason}` }, body: null, ackOf: null });
+                if (e.ok) await post(mine, e.envelope);
+              }
+              markRead();
+              // STILL rc 75: you do not hold it. `claim --wait && run` must not run.
+              return { exitCode: 75,
+                stdout: `waiting ${j.position} for ${r.holder.holder} ${r.holder.reason} expires ${r.holder.expires_ts}`,
+                stderr: `bus: you are #${j.position} on the wait list for ${shown(r.holder)} since ${j.row.joined_ts}, ` +
+                  `dropped at ${j.row.expires_ts}. When it is yours a [bus … claim] message says GRANTED — ` +
+                  `then re-run this claim to take your full ttl. Leave the list: bb bus release ${p.resource}` };
+            }
             if (r.kind === "busy") {
               // THE ONE WAKE A CLAIM CAUSES GOES TO THE HOLDER, not to the second
               // claimant. Spec §4 says the busy answer is an immediate message to the
@@ -235,9 +345,13 @@ export default async function plugin(bb: BbPluginApi) {
                 stdout: `busy ${r.holder.holder} ${r.holder.reason} expires ${r.holder.expires_ts}`,
                 stderr: `bus: ${r.holder.holder} holds ${shown(r.holder)}` +
                   (shown(r.holder) !== p.resource ? ` — the same file as ${p.resource} (${k.key})` : "") +
-                  `. It was told you are waiting.` };
+                  `. It was told you are waiting.` +
+                  (store.waiters(k.key).length ? ` ${store.waiters(k.key).length} already on its wait list.` : "") +
+                  ` To queue for it in order: add --wait.` };
             }
             store.putClaim({ ...r.row, spelled: p.resource });
+            store.removeWaiter(k.key, mine);
+            arm();
             if (r.tookFrom) {
               // The loss is DELIVERED, not merely logged — a stale takeover that only a
               // ledger records is a takeover the displaced holder acts against.
@@ -256,6 +370,7 @@ export default async function plugin(bb: BbPluginApi) {
             if (!resource) return fail("usage: bb bus heartbeat <resource>");
             const hk = claimKey(resource, ctx.cwd ?? null);
             if ("error" in hk) return fail(hk.error);
+            await sweep(mine);
             const existing = store.getClaim(hk.key);
             // The original ttl, so a heartbeat extends by what was asked for rather than
             // silently resetting every claim to the default.
@@ -277,6 +392,15 @@ export default async function plugin(bb: BbPluginApi) {
             const reason = ri >= 0 ? argv[ri + 1] ?? null : null;
             const rk = claimKey(resource, ctx.cwd ?? null);
             if ("error" in rk) return fail(rk.error);
+            // Leaving the wait list is a release of your PLACE (MX-1390).
+            if (!force && store.waiters(rk.key).some((w) => w.waiter === mine) &&
+                store.getClaim(rk.key)?.holder !== mine) {
+              store.removeWaiter(rk.key, mine);
+              arm();
+              markRead();
+              return { exitCode: 0, stdout: `left the wait list for ${resource}` };
+            }
+            await sweep(mine);
             const r = release({ existing: store.getClaim(rk.key), caller: mine, force, reason, now: new Date() });
             if ("error" in r) { markRead(); return fail(r.error); }
             store.putClaim(r.row);
@@ -285,9 +409,11 @@ export default async function plugin(bb: BbPluginApi) {
                 fields: { resource }, body: reason, ackOf: null });
               if (e.ok) await post(mine, e.envelope);
             }
+            const granted = (await sweep(mine)).find((g) => g.row.resource === rk.key);
             markRead();
             return { exitCode: 0,
-              stdout: `released ${resource}` + (r.notifyHolder ? ` (forced; ${r.notifyHolder} was told)` : "") };
+              stdout: `released ${resource}` + (r.notifyHolder ? ` (forced; ${r.notifyHolder} was told)` : "") +
+                (granted ? `\n  granted to ${granted.grant.waiter}, first on its wait list — it was told.` : "") };
           }
 
           case "log": {
@@ -410,7 +536,7 @@ function helpText(): string {
   return [
     "bb bus — typed peer bus between bb threads. One stream, no rooms.",
     "",
-    "  claim <resource> --reason <r> [--ttl 30m] · heartbeat <r> · release <r> [--force --reason '<why>'] · claims [--stale] [--mine]",
+    "  claim <resource> --reason <r> [--ttl 30m] [--wait [--max-wait 2h]] · heartbeat <r> · release <r> [--force --reason '<why>'] · claims [--stale] [--mine]",
     "  log [--kind K] [--ref R] [--from T] [--to T] [--since <ts>] [--unread] [-n N] · unanswered [--minutes N] · build",
     "",
     "  send --kind <kind> --to <id> [--ref <ref>] [--field k=v]… [--body - | --body-file <p>]",

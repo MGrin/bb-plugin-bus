@@ -5,6 +5,7 @@
 // selectivity rooms were meant to provide, and they work on a stream nobody has to
 // have joined.
 import type { Envelope } from "./envelope.ts";
+import type { WaiterRow } from "./claims.ts";
 
 /** The narrow slice of `better-sqlite3` this module needs — enough to fake in a test. */
 export interface Db {
@@ -88,6 +89,19 @@ export const MIGRATIONS = [
   // MX-977: `resource` becomes the canonical key; the spelling is kept for readers that
   // match on it (`mx gate` looks for `path:dotfiles/.mx-gate` by string).
   `ALTER TABLE claims ADD COLUMN spelled TEXT`,
+  // MX-1390: the FIFO wait list. Order is `seq`, never `joined_ts` — two joins in one
+  // millisecond must still have a first.
+  `CREATE TABLE IF NOT EXISTS claim_waiters (
+     seq INTEGER PRIMARY KEY AUTOINCREMENT,
+     resource TEXT NOT NULL,
+     waiter TEXT NOT NULL,
+     reason TEXT NOT NULL,
+     ttl_ms INTEGER NOT NULL,
+     spelled TEXT NOT NULL,
+     joined_ts TEXT NOT NULL,
+     expires_ts TEXT NOT NULL,
+     UNIQUE (resource, waiter)
+   )`,
 ] as const;
 
 /**
@@ -116,6 +130,16 @@ export interface Store {
   putClaim(c: ClaimRow): void;
   listClaims(f: { stale?: boolean; mine?: string }): ClaimRow[];
   releaseClaimsHeldBy(thread: string, now: string, cause: LifecycleCause): number;
+  /** Join order. Includes expired rows; `settle`/`joinWaitList` skip them by the clock. */
+  waiters(resource: string): WaiterRow[];
+  /** Every resource with anyone on its list. */
+  waitedResources(): string[];
+  addWaiter(w: WaiterRow): void;
+  removeWaiter(resource: string, waiter: string): void;
+  /** Drop rows past their --max-wait. Returns how many went. */
+  pruneWaiters(now: string): number;
+  /** A gone thread waits for nothing. Returns the resources it was waiting on. */
+  dropWaitersOf(thread: string): string[];
 }
 
 /** Why a thread's claims were released without the thread asking (MX-1280). Never
@@ -212,6 +236,39 @@ export function createStore(db: Db): Store {
             WHERE holder = ? AND released_ts IS NULL`,
         )
         .run(now, cause, thread).changes;
+    },
+
+    waiters(resource) {
+      return db.prepare(`SELECT resource, waiter, reason, ttl_ms, spelled, joined_ts, expires_ts
+                           FROM claim_waiters WHERE resource = ? ORDER BY seq`).all(resource) as WaiterRow[];
+    },
+
+    waitedResources() {
+      return (db.prepare(`SELECT DISTINCT resource FROM claim_waiters ORDER BY resource`).all() as
+        { resource: string }[]).map((r) => r.resource);
+    },
+
+    // INSERT OR IGNORE: a second join by the same waiter keeps its FIRST place.
+    addWaiter(w) {
+      db.prepare(
+        `INSERT OR IGNORE INTO claim_waiters
+           (resource, waiter, reason, ttl_ms, spelled, joined_ts, expires_ts) VALUES (?,?,?,?,?,?,?)`,
+      ).run(w.resource, w.waiter, w.reason, w.ttl_ms, w.spelled, w.joined_ts, w.expires_ts);
+    },
+
+    removeWaiter(resource, waiter) {
+      db.prepare(`DELETE FROM claim_waiters WHERE resource = ? AND waiter = ?`).run(resource, waiter);
+    },
+
+    pruneWaiters(now) {
+      return db.prepare(`DELETE FROM claim_waiters WHERE expires_ts <= ?`).run(now).changes;
+    },
+
+    dropWaitersOf(thread) {
+      const rs = (db.prepare(`SELECT resource FROM claim_waiters WHERE waiter = ?`).all(thread) as
+        { resource: string }[]).map((r) => r.resource);
+      db.prepare(`DELETE FROM claim_waiters WHERE waiter = ?`).run(thread);
+      return rs;
     },
   };
 }

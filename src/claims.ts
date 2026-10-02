@@ -123,3 +123,82 @@ export function release(a: {
     notifyHolder: mine ? null : a.existing.holder,
   };
 }
+
+// ── THE WAIT LIST (MX-1390) ────────────────────────────────────────────────────────────
+//
+// Without one a released slot went to whoever polled first. Measured 2026-10-02 on
+// path:~/.local/state/box-cpu-hog: a 25-minute e2e run blocking two merges waited while a
+// thread that arrived later took a fresh ~90-minute claim one minute after a release, and
+// the operator relayed the slot by hand four times in one day. `claim --wait` joins a FIFO
+// list; a release or an expiry GRANTS the slot to the head, and nobody can jump the list
+// while anyone is on it.
+
+/** How long a waiter stays on the list unless it says otherwise — then it is dropped. */
+export const DEFAULT_MAX_WAIT_MS = 2 * 60 * 60_000;
+
+/**
+ * A GRANT IS HELD FOR AT MOST TEN MINUTES UNTIL THE WAITER CONFIRMS IT. A waiter whose
+ * thread went idle is still a row on the list, and granting it a 3-hour claim would rebuild
+ * the exact incident this list exists to close — 2026-10-02T15:16Z, a 3h claim held by a
+ * thread reading idle. The grant wakes the waiter; re-running its claim takes the full ttl.
+ */
+export const GRANT_PICKUP_MS = 10 * 60_000;
+
+export interface WaiterRow {
+  resource: string;
+  waiter: string;
+  reason: string;
+  /** The ttl the waiter asked for; the confirming re-claim takes it. */
+  ttl_ms: number;
+  spelled: string;
+  joined_ts: string;
+  /** The waiter is dropped from the list at this time (--max-wait). */
+  expires_ts: string;
+}
+
+const waiting = (w: WaiterRow, now: Date): boolean => now.getTime() < Date.parse(w.expires_ts);
+
+/**
+ * Who gets a free slot. `waiters` is in join order. Returns null when the resource is
+ * still live, or when nobody (unexpired) waits — which is exactly today's behaviour.
+ */
+export function settle(a: {
+  existing: ClaimRow | null;
+  waiters: readonly WaiterRow[];
+  now: Date;
+}): { grant: WaiterRow; row: ClaimRow; tookFrom: string | null } | null {
+  if (a.existing && live(a.existing, a.now)) return null;
+  const head = a.waiters.find((w) => waiting(w, a.now));
+  if (!head) return null;
+  const iso = a.now.toISOString();
+  const row: ClaimRow = {
+    resource: head.resource, holder: head.waiter, reason: head.reason,
+    claimed_ts: iso, heartbeat_ts: iso,
+    expires_ts: new Date(a.now.getTime() + Math.min(head.ttl_ms, GRANT_PICKUP_MS)).toISOString(),
+    released_ts: null, released_by: null, stale: 0, spelled: head.spelled,
+  };
+  const tookFrom = a.existing && a.existing.released_ts === null ? a.existing.holder : null;
+  return { grant: head, row, tookFrom };
+}
+
+/** Join the list, or keep the place you already have: a re-run brief must not lose it. */
+export function joinWaitList(a: {
+  waiters: readonly WaiterRow[];
+  resource: string;
+  spelled: string;
+  waiter: string;
+  reason: string;
+  ttlMs: number;
+  maxWaitMs: number;
+  now: Date;
+}): { row: WaiterRow; position: number; joined: boolean } {
+  const queue = a.waiters.filter((w) => waiting(w, a.now));
+  const i = queue.findIndex((w) => w.waiter === a.waiter);
+  if (i >= 0) return { row: queue[i]!, position: i + 1, joined: false };
+  const row: WaiterRow = {
+    resource: a.resource, waiter: a.waiter, reason: a.reason, ttl_ms: a.ttlMs,
+    spelled: a.spelled, joined_ts: a.now.toISOString(),
+    expires_ts: new Date(a.now.getTime() + a.maxWaitMs).toISOString(),
+  };
+  return { row, position: queue.length + 1, joined: true };
+}
