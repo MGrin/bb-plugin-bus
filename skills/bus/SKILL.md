@@ -74,8 +74,19 @@ bb bus claim pr:685 --reason MX-849      # held pr:685 until <ts>
 bb bus heartbeat pr:685                  # extends by the original ttl
 bb bus release pr:685
 bb bus release pr:685 --force --reason 'holder stalled 40m'
-bb bus claims [--stale] [--mine]
+bb bus claims [--stale] [--mine]          # waiters are listed under each claim
+bb bus claim path:/x --reason BX-1 --wait [--max-wait 2h]   # join the FIFO wait list
+                                         # waiting 2 for thr_x MX-838 expires <ts>   (rc 75)
 ```
+
+**Waiting for a busy slot: `--wait`, never a poll loop** (MX-1390). It is still rc 75 —
+you do not hold it, so `claim --wait && run` does not run. You are on a FIFO list; when the
+holder releases, expires or is archived, the slot is **granted to the head** and a
+`[bus #n claim …] reason="GRANTED to you from the wait list"` message wakes you. A grant
+holds only **10 minutes**: re-run the same `bb bus claim … --ttl <yours>` to take your full
+ttl, or `bb bus release` it. Nobody can jump the list — a plain claim on a slot with waiters
+is `busy` to the head. Re-running `--wait` keeps your first place. You leave the list with
+`bb bus release <r>`, at `--max-wait` (default 2h, max 4h), or when your thread is archived.
 
 First holder wins; default TTL 30 minutes, maximum 4 hours. Past expiry the resource is
 taken by the next claimant and **the displaced holder is told** — an expiry that only a

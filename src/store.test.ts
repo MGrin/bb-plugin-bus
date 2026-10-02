@@ -23,7 +23,7 @@ test("there is no rooms table, no members table and no cursors table", () => {
   const { db } = fresh();
   const names = (db.prepare(`SELECT name FROM sqlite_master WHERE type='table'`).all() as { name: string }[])
     .map((r) => r.name).filter((n) => !n.startsWith("sqlite_"));
-  deepStrictEqual(names.sort(), ["claims", "messages"]);
+  deepStrictEqual(names.sort(), ["claim_waiters", "claims", "messages"]);
 });
 
 test("seq is assigned by the store and rises", () => {

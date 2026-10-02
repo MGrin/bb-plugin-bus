@@ -15,7 +15,7 @@ bb plugin install git:https://github.com/MGrin/bb-plugin-bus.git@main
 ```sh
 bb bus send --kind <kind> --to <thread-id> [--ref <ref>] [--field k=v]… [--body-file <p>]
 bb bus <kind> --to <thread-id> …                 # one verb per kind; same validation
-bb bus claim <resource> --reason <r> [--ttl 30m] # held / busy (rc 75)
+bb bus claim <resource> --reason <r> [--ttl 30m] [--wait [--max-wait 2h]] # held / busy / waiting (rc 75)
 bb bus heartbeat <resource> · release <resource> [--force --reason '<why>'] · claims [--stale] [--mine]
 bb bus log [--kind K] [--ref R] [--from T] [--to T] [--since <ts>] [--unread] [-n N]
 bb bus unanswered [--minutes N] · build
@@ -64,7 +64,7 @@ rule reachable by `node --test` without bb running.
 | `src/kinds.ts` | **the kind table** — the single source for fields, ack and wake mode |
 | `src/refs.ts` | the two prefixed vocabularies (`ref` and `resource` are not the same) |
 | `src/envelope.ts` | validation, `BODY_CAP`, the one-line injected form |
-| `src/store.ts` | the two tables — `messages`, `claims` — and every statement over them |
+| `src/store.ts` | the three tables — `messages`, `claims`, `claim_waiters` — and every statement over them |
 | `src/claims.ts` | the claim state machine, pure over an injected clock |
 | `src/delivery.ts` | one delivery primitive, two modes, the 409 fallback |
 | `src/cli.ts` | argv; the verb list is generated from the kind table |
@@ -77,6 +77,15 @@ First holder wins; a second claimant gets `busy` at rc 75. Default TTL 30 minute
 next claimant and **the displaced holder is told** — an expiry that only a ledger records is
 one the old holder acts against. Archiving or deleting a thread releases its claims, so a
 dead thread cannot hold `pr:685` forever.
+
+**The wait list** (MX-1390). `claim --wait` joins a FIFO list for a held resource (still rc
+75). A release, an expiry or the holder's archive grants the slot to the head, as a `claim`
+message to it; the grant holds 10 minutes until the waiter re-claims for its own ttl, so a
+waiter that went idle cannot rebuild the 3-hour idle hold that prompted this. A plain claim
+cannot jump the list. A waiter leaves at `--max-wait` (default 2h), by `release`, or when its
+thread is archived or deleted. Because an expiry nobody touches would otherwise strand the
+head, the server arms ONE timer for the earliest expiry among waited claims; with nobody
+waiting it arms nothing.
 
 Enforcement is SPECIFIED AND NOT YET DEPLOYED, and the difference is the whole point of
 saying so here. `bus_claim_required` reads this store read-only and refuses `gh pr merge

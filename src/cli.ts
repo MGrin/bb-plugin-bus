@@ -16,13 +16,13 @@ export interface Command {
 const FIXED: readonly Command[] = [
   { name: "send", summary: "Send a typed message",
     usage: "bb bus send --kind <kind> --to <thread-id> [--ref <ref>] [--field k=v]… [--body - | --body-file <p>]" },
-  { name: "claim", summary: "Take a resource exclusively",
-    usage: "bb bus claim <resource> --reason <r> [--ttl 30m]" },
+  { name: "claim", summary: "Take a resource exclusively; --wait joins its FIFO wait list",
+    usage: "bb bus claim <resource> --reason <r> [--ttl 30m] [--wait [--max-wait 2h]]" },
   { name: "heartbeat", summary: "Extend your claim by its ttl",
     usage: "bb bus heartbeat <resource>" },
   { name: "release", summary: "Release a resource you hold",
     usage: "bb bus release <resource> [--force --reason '<why>']" },
-  { name: "claims", summary: "List claims",
+  { name: "claims", summary: "List claims, and who waits for each since when",
     usage: "bb bus claims [--stale] [--mine]" },
   { name: "log", summary: "Query history (the only read of it)",
     usage: "bb bus log [--kind K] [--ref R] [--from T] [--to T] [--since <ts>] [--unread] [-n N]" },
@@ -236,26 +236,38 @@ export function parseLog(argv: readonly string[]): LogFilter | { error: string }
   return f;
 }
 
+export const CLAIM_USAGE = "usage: bb bus claim <resource> --reason <r> [--ttl 30m] [--wait [--max-wait 2h]]";
+
 export function parseClaim(
   argv: readonly string[],
-): { resource: string; ttl: string; reason: string } | { error: string } {
+): { resource: string; ttl: string; reason: string; wait: boolean; maxWait: string } | { error: string } {
   const resource = argv[1];
   if (!resource || resource.startsWith("-")) {
-    return { error: "usage: bb bus claim <resource> --reason <r> [--ttl 30m]" };
+    return { error: CLAIM_USAGE };
   }
   let ttl = "30m";
   let reason = "";
+  let wait = false;
+  let maxWait: string | null = null;
   for (let i = 2; i < argv.length; i++) {
     const w = argv[i]!;
+    // `--wait` is the one flag here with no value (MX-1390).
+    if (w === "--wait") { wait = true; continue; }
     const v = argv[i + 1];
     if (v === undefined) return { error: `bus: ${w} needs a value` };
     i++;
     if (w === "--ttl") ttl = v;
     else if (w === "--reason") reason = v;
+    else if (w === "--max-wait") maxWait = v;
     else return { error: `bus: claim has no flag '${w}'` };
   }
   if (!reason) {
     return { error: "bus: claim needs --reason <task key or one line> — a claim nobody can attribute is not auditable" };
   }
-  return { resource, ttl, reason };
+  // A --max-wait without --wait would be silently ignored, which reads as a wait that
+  // was promised and never queued. Refused instead.
+  if (maxWait !== null && !wait) {
+    return { error: "bus: --max-wait only means something with --wait" };
+  }
+  return { resource, ttl, reason, wait, maxWait: maxWait ?? "2h" };
 }

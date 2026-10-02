@@ -11,7 +11,7 @@ equals `KIND_NAMES`, so the debt is checked rather than remembered.
 
 ```sh
 npm install          # rc=0
-npm test             # node --test over src/*.test.ts — 94 tests, 0 fail
+npm test             # node --test over src/*.test.ts — 140 tests, 0 fail (2026-10-03)
 npm run test:live    # six cases against a REAL bb and two spawned threads
 npm run typecheck    # tsc --noEmit, rc=0
 bb plugin build .    # dist/server.js + dist/server.meta.json
@@ -44,7 +44,7 @@ the one a contributor reads first. The single fact that governs edits here:
   row in `src/kinds.ts` and a test.
 - **Nothing here waits, blocks or polls.** Delivery is the bb server's job; a listener, a
   poller or a queue drain breaks the property the design rests on — that a session cannot
-  silently go deaf.
+  silently go deaf. The one exception is the wait list's single expiry timer (MX-1390).
 - **Two facts about bb that constrain every change here** — a body can only come from
   `--body-file` (bb forwards neither argv-safe prose nor stdin to a plugin CLI), and
   `queue` still wakes an idle thread. Both are measured, with their incidents, in
