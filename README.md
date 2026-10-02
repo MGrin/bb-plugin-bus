@@ -87,6 +87,11 @@ thread is archived or deleted. Because an expiry nobody touches would otherwise 
 head, the server arms ONE timer for the earliest expiry among waited claims; with nobody
 waiting it arms nothing.
 
+**No renewal while anyone waits** (MX-1394). With a non-empty list, `heartbeat` and the
+holder's own re-claim are refused at rc 75, naming the waiters, so a contended claim lasts
+the ttl its holder asked for; the 3-hour idle hold on 2026-10-02 was a renewed one. The one
+exception is a granted waiter confirming its pickup. With nobody waiting, nothing changed.
+
 Enforcement is SPECIFIED AND NOT YET DEPLOYED, and the difference is the whole point of
 saying so here. `bus_claim_required` reads this store read-only and refuses `gh pr merge
 <n>` without `pr:<n>`, `bb thread delete <id>` without `thread:<id>`, `bb memory forget

@@ -13,7 +13,7 @@ import { KINDS, KIND_NAMES, isKind, schemaLine } from "./src/kinds.ts";
 import { renderEnvelope, validate, type Envelope } from "./src/envelope.ts";
 import { MIGRATIONS, createStore, type ClaimRow, type Db, type LifecycleCause, type MessageRow } from "./src/store.ts";
 import { claimKey } from "./src/paths.ts";
-import { DEFAULT_TTL_MS, GRANT_PICKUP_MS, attemptClaim, heartbeat, joinWaitList, parseTtl, release, settle,
+import { DEFAULT_TTL_MS, GRANT_PICKUP_MS, attemptClaim, heartbeat, joinWaitList, parseTtl, release, renewalRefused, settle,
   type WaiterRow } from "./src/claims.ts";
 import { deliver, receipt, type Outcome } from "./src/delivery.ts";
 
@@ -309,6 +309,10 @@ export default async function plugin(bb: BbPluginApi) {
             if ("error" in maxWait) return fail(`--max-wait: ${maxWait.error}`);
             await sweep(mine);
             const now = new Date();
+            // A re-claim of what you hold IS a renewal; refused while anyone waits (MX-1394).
+            const no = renewalRefused({ existing: store.getClaim(k.key), waiters: store.waiters(k.key),
+              caller: mine, confirming: true, now });
+            if (no) { markRead(); return { exitCode: 75, stdout: `contended ${p.resource}`, stderr: no }; }
             const r = attemptClaim({ existing: store.getClaim(k.key), resource: k.key,
               holder: mine, reason: p.reason, ttlMs: ttl.ms, now });
             if (r.kind === "busy" && p.wait) {
@@ -377,6 +381,9 @@ export default async function plugin(bb: BbPluginApi) {
             const ttlMs = existing
               ? Date.parse(existing.expires_ts) - Date.parse(existing.claimed_ts)
               : DEFAULT_TTL_MS;
+            const no = renewalRefused({ existing, waiters: store.waiters(hk.key), caller: mine,
+              confirming: false, now: new Date() });
+            if (no) { markRead(); return { exitCode: 75, stderr: no }; }
             const r = heartbeat({ existing, holder: mine, ttlMs, now: new Date() });
             markRead();
             if ("error" in r) return fail(r.error);

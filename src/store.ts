@@ -44,6 +44,9 @@ export interface ClaimRow {
   /** The resource as the holder TYPED it. `resource` is the key (MX-977); null on a row
    *  written before the key existed, whose key and spelling were the same string. */
   spelled?: string | null;
+  /** 1 on a row the wait list GRANTED and its waiter has not yet confirmed (MX-1394): the
+   *  one renewal a contended claim is allowed is the waiter taking its own ttl. */
+  pickup?: number;
 }
 
 export interface LogFilter {
@@ -102,6 +105,7 @@ export const MIGRATIONS = [
      expires_ts TEXT NOT NULL,
      UNIQUE (resource, waiter)
    )`,
+  `ALTER TABLE claims ADD COLUMN pickup INTEGER NOT NULL DEFAULT 0`,
 ] as const;
 
 /**
@@ -209,10 +213,10 @@ export function createStore(db: Db): Store {
     putClaim(c) {
       db.prepare(
         `INSERT OR REPLACE INTO claims
-           (resource, holder, reason, claimed_ts, heartbeat_ts, expires_ts, released_ts, released_by, stale, spelled)
-         VALUES (?,?,?,?,?,?,?,?,?,?)`,
+           (resource, holder, reason, claimed_ts, heartbeat_ts, expires_ts, released_ts, released_by, stale, spelled, pickup)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
       ).run(c.resource, c.holder, c.reason, c.claimed_ts, c.heartbeat_ts, c.expires_ts,
-            c.released_ts, c.released_by, c.stale, c.spelled ?? null);
+            c.released_ts, c.released_by, c.stale, c.spelled ?? null, c.pickup ?? 0);
     },
 
     listClaims(f) {
