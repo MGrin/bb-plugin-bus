@@ -78,6 +78,14 @@ next claimant and **the displaced holder is told** — an expiry that only a led
 one the old holder acts against. Archiving or deleting a thread releases its claims, so a
 dead thread cannot hold `pr:685` forever.
 
+**A busy claim tells the holder once** (MX-1400). A plain claim on a held resource sends the
+holder one `claim` message per claimant per holder claim: a claimant polling every 15 s
+woke one holder 7 times for one wait on 2026-10-04. Later attempts are still rc 75 with the
+same output and post nothing. "Already told" is read from the message rows themselves — a
+`claim` from that claimant to that holder about the same key since the holder's
+`claimed_ts` — so there is no table to keep in step, and a new holder claim (a release and
+re-take, an expiry and take, a renewal) resets it. A `--wait` join still tells the holder.
+
 **The wait list** (MX-1390). `claim --wait` joins a FIFO list for a held resource (still rc
 75). A release, an expiry or the holder's archive grants the slot to the head, as a `claim`
 message to it; the grant holds 10 minutes until the waiter re-claims for its own ttl, so a

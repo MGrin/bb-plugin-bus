@@ -1,6 +1,6 @@
 import { match, ok, strictEqual } from "node:assert/strict";
 import { test } from "node:test";
-import { DEFAULT_TTL_MS, MAX_TTL_MS, attemptClaim, heartbeat, isHeldBy, parseTtl, release } from "./claims.ts";
+import { DEFAULT_TTL_MS, MAX_TTL_MS, attemptClaim, heartbeat, holderAlreadyTold, isHeldBy, parseTtl, release } from "./claims.ts";
 import type { ClaimRow } from "./store.ts";
 
 const T0 = new Date("2026-09-09T00:00:00Z");
@@ -120,4 +120,20 @@ test("isHeldBy: true only inside the TTL, for that thread, unreleased", () => {
   ok(!isHeldBy(held(), "thr_a", at(31)));
   ok(!isHeldBy(held({ released_ts: at(1).toISOString() }), "thr_a", at(2)));
   ok(!isHeldBy(null, "thr_a", T0));
+});
+
+// MX-1400. Each line names the mutant it kills.
+test("holderAlreadyTold: a claim message at or after the holder's claimed_ts, same key, counts", () => {
+  const msg = (over: { resource?: string; reason?: string; at?: number } = {}) => ({
+    created_ts: at(over.at ?? 1).toISOString(),
+    fields: JSON.stringify({ resource: over.resource ?? "pr:685", ttl: "30m", reason: over.reason ?? "MX-2" }) });
+  const told = (sent: { fields: string; created_ts: string }[], claimedAt = 0) =>
+    holderAlreadyTold({ holder: held({ claimed_ts: at(claimedAt).toISOString() }), sent, keyOf: (s) => s });
+  strictEqual(told([]), false);                                  // mutant: always true
+  strictEqual(told([msg()]), true);                              // mutant: always false
+  strictEqual(told([msg({ at: 1 })], 5), false);                 // mutant: no claimed_ts bound
+  strictEqual(told([msg({ at: 5 })], 5), true);                  // mutant: strict > on the bound
+  strictEqual(told([msg({ resource: "pr:9" })]), false);         // mutant: key not compared
+  strictEqual(told([msg({ reason: "GRANTED to you from the wait list (x)" })]), false); // mutant: grants count
+  strictEqual(told([{ created_ts: at(1).toISOString(), fields: "not json" }]), false);
 });

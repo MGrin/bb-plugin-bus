@@ -13,7 +13,7 @@ import { KINDS, KIND_NAMES, isKind, schemaLine } from "./src/kinds.ts";
 import { renderEnvelope, validate, type Envelope } from "./src/envelope.ts";
 import { MIGRATIONS, createStore, type ClaimRow, type Db, type LifecycleCause, type MessageRow } from "./src/store.ts";
 import { claimKey } from "./src/paths.ts";
-import { DEFAULT_TTL_MS, GRANT_PICKUP_MS, attemptClaim, heartbeat, joinWaitList, parseTtl, release, renewalRefused, settle,
+import { DEFAULT_TTL_MS, GRANT_PICKUP_MS, attemptClaim, heartbeat, holderAlreadyTold, joinWaitList, parseTtl, release, renewalRefused, settle,
   type WaiterRow } from "./src/claims.ts";
 import { deliver, receipt, type Outcome } from "./src/delivery.ts";
 
@@ -341,9 +341,13 @@ export default async function plugin(bb: BbPluginApi) {
               // second claimant — but that is the caller, who already has it on stdout at
               // rc 75. The HOLDER is the only party not looking, and telling them somebody
               // is waiting is the thing that moves the resource along. README says so.
+              // ONCE per holder claim (MX-1400): a polled plain claim woke it every time.
+              const told = holderAlreadyTold({ holder: r.holder,
+                sent: store.log({ kind: "claim", from: mine, to: r.holder.holder, since: r.holder.claimed_ts, limit: 500 }),
+                keyOf: (s) => { const x = claimKey(s, ctx.cwd ?? null); return "error" in x ? null : x.key; } });
               const e = validate({ kind: "claim", to: r.holder.holder, ref: null,
                 fields: { resource: p.resource, ttl: p.ttl, reason: p.reason }, body: null, ackOf: null });
-              if (e.ok) await post(mine, e.envelope);
+              if (e.ok && !told) await post(mine, e.envelope);
               markRead();
               return { exitCode: 75,
                 stdout: `busy ${r.holder.holder} ${r.holder.reason} expires ${r.holder.expires_ts}`,

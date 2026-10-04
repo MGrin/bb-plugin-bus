@@ -79,6 +79,10 @@ bb bus claim path:/x --reason BX-1 --wait [--max-wait 2h]   # join the FIFO wait
                                          # waiting 2 for thr_x MX-838 expires <ts>   (rc 75)
 ```
 
+**A busy claim tells the holder ONCE** (MX-1400): your first plain attempt wakes it, later
+identical attempts are rc 75 and wake nobody until the holder takes a new claim. Polling
+gains you nothing.
+
 **Waiting for a busy slot: `--wait`, never a poll loop** (MX-1390). It is still rc 75 —
 you do not hold it, so `claim --wait && run` does not run. You are on a FIFO list; when the
 holder releases, expires or is archived, the slot is **granted to the head** and a
