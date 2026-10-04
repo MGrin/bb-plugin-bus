@@ -230,3 +230,31 @@ export function renewalRefused(a: {
     `renewed — a contended claim lasts the ttl you asked for, until ${a.existing.expires_ts}. ` +
     `Finish and release it: bb bus release ${a.existing.spelled ?? a.existing.resource}`;
 }
+
+/**
+ * Has `claimant` already told the holder of this claim that it wants the slot? (MX-1400)
+ *
+ * A plain busy claim wakes the holder; a claimant that polls instead of passing --wait
+ * woke it on EVERY attempt — seven identical wakes for one wait on 2026-10-04. So a busy
+ * claim tells each claimant's holder once per HOLDER CLAIM, and "once" is derived from the
+ * message rows the bus already keeps rather than from a table of its own: any `claim`
+ * message from the claimant to the holder, about the same key, written at or after the
+ * holder's `claimed_ts`. A release and re-take or an expiry and take writes a new
+ * `claimed_ts`, so it resets on its own. A --wait join counts: the holder already knows.
+ *
+ * A GRANT does not count. It is sent as from the holder whose claim lapsed, and that
+ * thread wanting the slot back is news to the new holder.
+ */
+export function holderAlreadyTold(a: {
+  holder: ClaimRow;
+  sent: { fields: string; created_ts: string }[];
+  keyOf: (spelled: string) => string | null;
+}): boolean {
+  return a.sent.some((m) => {
+    if (m.created_ts < a.holder.claimed_ts) return false;
+    let f: { resource?: unknown; reason?: unknown };
+    try { f = JSON.parse(m.fields); } catch { return false; }
+    if (typeof f.reason === "string" && f.reason.startsWith("GRANTED")) return false;
+    return typeof f.resource === "string" && a.keyOf(f.resource) === a.holder.resource;
+  });
+}

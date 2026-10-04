@@ -11,7 +11,7 @@ equals `KIND_NAMES`, so the debt is checked rather than remembered.
 
 ```sh
 npm install          # rc=0
-npm test             # node --test over src/*.test.ts — 140 tests, 0 fail (2026-10-03)
+npm test             # node --test over src/*.test.ts — 151 tests, 0 fail (2026-10-04)
 npm run test:live    # six cases against a REAL bb and two spawned threads
 npm run typecheck    # tsc --noEmit, rc=0
 bb plugin build .    # dist/server.js + dist/server.meta.json

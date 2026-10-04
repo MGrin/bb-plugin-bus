@@ -273,3 +273,82 @@ test("MX-1394: a granted waiter may still CONFIRM its pickup while others wait �
   const again = await h.as(B)("claim", R, "--reason", "b", "--ttl", "4h");
   assert.equal(again.exitCode, 75, "the confirm is the only renewal");
 });
+
+// MX-1400: a PLAIN busy claim tells the holder once per (claimant, holder claim). Each test
+// names the mutant it kills.
+const fromTo = (h: { sent: { to: string; from: string }[] }, from: string, to: string) =>
+  h.sent.filter((m) => m.from === from && m.to === to).length;
+const tick = () => new Promise((r) => setTimeout(r, 5));
+
+test("MX-1400: N polled plain claims wake the holder ONCE, each still rc 75 with the same output", async () => {
+  // Kills: posting on every busy attempt (the pre-MX-1400 code) — 5 messages, not 1.
+  const h = await host();
+  await h.as(A)("claim", R, "--reason", "a");
+  const runs = [];
+  for (let i = 0; i < 5; i++) runs.push(await h.as(C)("claim", R, "--reason", "c"));
+  assert.equal(fromTo(h, C, A), 1);
+  for (const r of runs) {
+    assert.equal(r.exitCode, 75);
+    assert.equal(r.stdout, runs[0].stdout);
+    assert.equal(r.stderr, runs[0].stderr);
+  }
+});
+
+test("MX-1400: a NEW holder claim resets it — release and re-take, and expiry and take", async () => {
+  // Kills: "told" read across all time instead of since the holder's claimed_ts.
+  const h = await host();
+  await h.as(A)("claim", R, "--reason", "a");
+  await h.as(C)("claim", R, "--reason", "c");
+  await h.as(C)("claim", R, "--reason", "c");
+  assert.equal(fromTo(h, C, A), 1);
+  await h.as(A)("release", R);
+  await tick();
+  await h.as(A)("claim", R, "--reason", "a again");
+  await h.as(C)("claim", R, "--reason", "c");
+  await h.as(C)("claim", R, "--reason", "c");
+  assert.equal(fromTo(h, C, A), 2, "a re-take is a new holder claim: told once more");
+  h.expireHolder();
+  await tick();
+  assert.equal((await h.as(B)("claim", R, "--reason", "b")).exitCode, 0);
+  await h.as(C)("claim", R, "--reason", "c");
+  await h.as(C)("claim", R, "--reason", "c");
+  assert.equal(fromTo(h, C, B), 1, "the expiry's taker is told once");
+});
+
+test("MX-1400: two different claimants each tell the holder once", async () => {
+  // Kills: "told" read from ANY claimant's messages (the from filter dropped).
+  const h = await host();
+  await h.as(A)("claim", R, "--reason", "a");
+  for (let i = 0; i < 3; i++) {
+    await h.as(B)("claim", R, "--reason", "b");
+    await h.as(C)("claim", R, "--reason", "c");
+  }
+  assert.equal(fromTo(h, B, A), 1);
+  assert.equal(fromTo(h, C, A), 1);
+});
+
+test("MX-1400 CONTROL: one claimant polling two held resources tells the holder once for EACH", async () => {
+  // Kills: "told" ignoring which resource the message was about.
+  const h = await host();
+  await h.as(A)("claim", R, "--reason", "a");
+  await h.as(A)("claim", "pr:10", "--reason", "a");
+  for (let i = 0; i < 2; i++) {
+    await h.as(C)("claim", R, "--reason", "c");
+    await h.as(C)("claim", "pr:10", "--reason", "c");
+  }
+  assert.equal(fromTo(h, C, A), 2);
+});
+
+test("MX-1400: the --wait path still tells the holder on joining, after a plain claim already did", async () => {
+  // Kills: gating the --wait join notification on the new "already told" check — 1, not 2.
+  // And a re-run of --wait, or a later plain poll, still adds nothing.
+  const h = await host();
+  await h.as(A)("claim", R, "--reason", "a");
+  await h.as(B)("claim", R, "--reason", "b");
+  assert.equal(fromTo(h, B, A), 1);
+  assert.equal((await h.as(B)("claim", R, "--reason", "b", "--wait")).exitCode, 75);
+  assert.equal(fromTo(h, B, A), 2);
+  await h.as(B)("claim", R, "--reason", "b", "--wait");
+  await h.as(B)("claim", R, "--reason", "b");
+  assert.equal(fromTo(h, B, A), 2);
+});
