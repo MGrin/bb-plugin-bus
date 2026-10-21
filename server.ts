@@ -8,7 +8,7 @@
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
-import { COMMANDS, UNREAD_SELF, parseClaim, parseLog, parseSend, parseSugar } from "./src/cli.ts";
+import { COMMANDS, UNREAD_SELF, parseClaim, parseJoin, parseLog, parseSend, parseSugar } from "./src/cli.ts";
 import { KINDS, KIND_NAMES, isKind, schemaLine } from "./src/kinds.ts";
 import { renderEnvelope, validate, type Envelope } from "./src/envelope.ts";
 import { MIGRATIONS, createStore, type ClaimRow, type Db, type LifecycleCause, type MessageRow } from "./src/store.ts";
@@ -16,6 +16,15 @@ import { claimKey } from "./src/paths.ts";
 import { DEFAULT_TTL_MS, GRANT_PICKUP_MS, attemptClaim, heartbeat, holderAlreadyTold, joinWaitList, parseTtl, release, renewalRefused, settle,
   type WaiterRow } from "./src/claims.ts";
 import { deliver, receipt, type Outcome } from "./src/delivery.ts";
+import { parseAddress } from "./src/shared/address.ts";
+import { RelayUnreachable, createRelayClient, type RelayClaim, type RelayClient } from "./src/shared/relay.ts";
+import { attachShared, createSharedStore, sharedPathFor, type SharedRow } from "./src/shared/store.ts";
+import { SYNC_INTERVAL_MS, syncOnce } from "./src/shared/sync.ts";
+import { fmtShared, renderShared } from "./src/shared/render.ts";
+
+/** rc 75: somebody holds it. rc 69: the relay could not be asked — a different answer (MX-1528). */
+const RC_BUSY = 75;
+const RC_UNREACHABLE = 69;
 
 /**
  * Which commit is this PROCESS running?
@@ -70,6 +79,71 @@ export default async function plugin(bb: BbPluginApi) {
   bb.storage.migrate(db, [...MIGRATIONS]);
   const store = createStore(db as unknown as Db);
 
+  // ── THE SHARED SPACE (MX-1528) ──────────────────────────────────────────────────
+  //
+  // Off until all three settings are set, and then only for threads that JOIN. Its copy of
+  // what crossed lives in shared.db, a separate file attached to this connection, so a
+  // backup that copies data.db cannot carry a crossed secret (see src/shared/store.ts).
+  const settings = bb.settings.define({
+    server: { type: "string", label: "Server name",
+      description: "This bb server's name in the shared space (the relay knows its token by it). Empty keeps the bus local." },
+    relayUrl: { type: "string", label: "Relay URL",
+      description: "Base URL of the shared-space relay, without /v2." },
+    token: { type: "string", label: "Relay token", secret: true,
+      description: "This server's bearer token for the relay." },
+  });
+  attachShared(db as unknown as Db, sharedPathFor(db as unknown as Db));
+  const shared = createSharedStore(db as unknown as Db);
+  const NOT_CONFIGURED = `bus: the shared space is not configured on this server. Set it once: ` +
+    `bb plugin config ${bb.pluginId} set server <name>, … set relayUrl <url>, … set token <token>`;
+
+  async function sharedCfg(): Promise<{ server: string; url: string; client: RelayClient } | null> {
+    const v = await settings.get();
+    const server = v.server?.trim();
+    const url = v.relayUrl?.trim();
+    const token = v.token?.trim();
+    if (!server || !url || !token) return null;
+    return { server, url, client: createRelayClient({ url, token }) };
+  }
+
+  /** A crossed message into a local thread, by its kind's own wake mode. No sender thread: it is not on this server. */
+  async function deliverCrossed(row: SharedRow): Promise<{ ok: true } | { ok: false; error: string }> {
+    const input = [{ type: "text" as const, mentions: [], text: renderShared(row) }];
+    const o = await deliver({
+      send: async () => { await bb.sdk.threads.send({ threadId: row.to_thread, mode: "auto", input }); },
+      queue: async () => { await bb.sdk.threads.queuedMessages.create({ threadId: row.to_thread, input }); },
+    }, isKind(row.kind) ? KINDS[row.kind].wake : "queue");
+    return o.kind === "failed" ? { ok: false, error: o.error } : { ok: true };
+  }
+
+  // THE ONE POLLER, and it exists only because nothing may connect INTO a Mac (spec §5).
+  // With the shared space off it reads its settings every tick and does nothing else.
+  bb.background.service("shared-sync", {
+    async start(signal) {
+      let down: string | null = null;
+      while (!signal.aborted) {
+        const cfg = await sharedCfg().catch(() => null);
+        if (cfg) {
+          try {
+            await syncOnce({ client: cfg.client, store: shared, myServer: cfg.server, now: () => new Date(),
+              deliver: deliverCrossed, warn: (w) => bb.log.warn(`bus shared: ${w}`) });
+            if (down) bb.log.info(`bus shared: the relay at ${cfg.url} answers again`);
+            down = null;
+          } catch (e) {
+            const why = e instanceof Error ? e.message : String(e);
+            // Said once per distinct failure, not every ten seconds.
+            if (down !== why) bb.log.warn(`bus shared: sync failed: ${why}`);
+            down = why;
+          }
+        }
+        await new Promise<void>((res) => {
+          const t = setTimeout(res, SYNC_INTERVAL_MS);
+          signal.addEventListener("abort", () => { clearTimeout(t); res(); }, { once: true });
+        });
+      }
+    },
+  });
+
   // A DELETED OR ARCHIVED THREAD CANNOT HOLD pr:685 FOREVER. The old plugin dropped
   // room membership here; there is no membership now, and the thing that outlives a dead
   // thread and blocks everybody else is a claim. `released_by` names the event (MX-1280),
@@ -105,6 +179,12 @@ export default async function plugin(bb: BbPluginApi) {
     // whatever it held passes to the head of that resource's list.
     store.dropWaitersOf(id);
     store.releaseClaimsHeldBy(id, nowIso(), cause);
+    // A joined thread leaves the shared space with it; the relay releases its shared claims.
+    // Queued, so a relay that is away now still hears it on the next sync.
+    if (shared.joined(id)) {
+      shared.leave(id);
+      shared.addPendingLeave(id, cause, nowIso());
+    }
     await sweep(null);
   };
   bb.events.on("thread.archived", ({ thread }) => releaseIfGone(thread.id, "thread-archived"));
@@ -243,6 +323,20 @@ export default async function plugin(bb: BbPluginApi) {
     return `${shown(c)}${key}  ${c.holder}  ${state}  (${c.reason})`;
   };
 
+  const fmtSharedClaim = (c: RelayClaim, now: Date): string => {
+    const state = now.getTime() >= Date.parse(c.expires) ? `EXPIRED ${c.expires}` : `held until ${c.expires}`;
+    const key = c.spelled !== c.resource ? ` = ${c.resource}` : "";
+    return [`${c.spelled}${key}  ${c.holder_thread}@${c.holder_server}  ${state}  (${c.reason})  [shared]`,
+      ...c.waiters.map((w, i) => `    waiting ${i + 1}. ${w.thread}@${w.server} since ${w.joined}  gives up ${w.expires}  (${w.reason})`),
+    ].join("\n");
+  };
+  const liveShared = (c: RelayClaim | null, now: Date): c is RelayClaim => c !== null && now.getTime() < Date.parse(c.expires);
+  const say = (e: unknown) => (e instanceof Error ? e.message : String(e));
+  /** A relay failure as a CLI answer: unreachable is rc 69, a refusal is rc 1, each in the relay's words. */
+  const relayFail = (e: unknown, what: string) => e instanceof RelayUnreachable
+    ? { exitCode: RC_UNREACHABLE, stderr: `bus: ${say(e)} — ${what}` }
+    : { exitCode: 1, stderr: `bus: the relay refused: ${say(e)}` };
+
   bb.cli.register({
     name: "bus",
     summary: "Typed peer bus between bb threads: twelve kinds, claims, one stream",
@@ -263,6 +357,24 @@ export default async function plugin(bb: BbPluginApi) {
           stdout: `loaded ${BUILD_STAMP.rev ?? "unknown"}${dirty} from ${BUILD_STAMP.sourceDir} at ${BUILD_STAMP.loadedAt}${why}` };
       }
 
+      // `peers` also answers outside a thread: an install script checks the relay with it.
+      if (cmd === "peers") {
+        const cfg = await sharedCfg();
+        if (!cfg) return fail(NOT_CONFIGURED);
+        try {
+          const ps = await cfg.client.peers();
+          shared.setPeers(ps);
+          if (argv.includes("--json")) return { exitCode: 0, stdout: JSON.stringify(ps) };
+          return { exitCode: 0, stdout: ps.length
+            ? ps.map((x) => `${x.thread}@${x.server}${x.thread === me && x.server === cfg.server ? " (you)" : ""}  joined ${x.joined}  ${x.description}`).join("\n")
+            : "nobody has joined the shared space" };
+        } catch (e) {
+          const cached = shared.peers();
+          const r = relayFail(e, `this is this server's last copy, from ${shared.getMeta("synced_at") ?? "never"}`);
+          return { ...r, stdout: cached.map((x) => `${x.thread}@${x.server}  joined ${x.joined}  ${x.description}`).join("\n") };
+        }
+      }
+
       if (!me && cmd !== "help") {
         return fail("bus: no thread context — run from inside a bb thread");
       }
@@ -271,7 +383,13 @@ export default async function plugin(bb: BbPluginApi) {
       // `read_ts` is set on every row addressed to me when I next call ANY verb. Taken
       // AFTER the command has produced its output, so `log --unread` shows what was
       // unread at entry and marks it in the same breath.
-      const markRead = () => store.markReadFor(mine, nowIso());
+      // The shared space's name for this server; null while it is not configured, and then
+      // nothing below reads or writes a crossed row.
+      const my = (await sharedCfg().catch(() => null))?.server ?? null;
+      const markRead = () => {
+        store.markReadFor(mine, nowIso());
+        if (my) shared.markReadFor(mine, my, nowIso());
+      };
 
       try {
         switch (cmd) {
@@ -282,17 +400,23 @@ export default async function plugin(bb: BbPluginApi) {
               stale: argv.includes("--stale") || undefined,
               mine: argv.includes("--mine") ? mine : undefined,
             });
+            // Shared claims, from this server's copy (no network): every server sees who holds one.
+            const sc = argv.includes("--stale") ? [] : shared.claims()
+              .filter((c) => !argv.includes("--mine") || (c.holder_thread === mine && c.holder_server === my));
             markRead();
             // JSON keeps `resource` = the TYPED spelling, which is what readers match on
             // (`mx gate`); the key it was held under is `key`.
             if (argv.includes("--json")) {
-              return { exitCode: 0, stdout: JSON.stringify(rows.map(({ spelled, ...c }) =>
+              return { exitCode: 0, stdout: JSON.stringify([...rows.map(({ spelled, ...c }) =>
                 ({ ...c, resource: spelled ?? c.resource, key: c.resource,
-                   waiters: store.waiters(c.resource).map(({ resource: _r, ...w }) => w) }))) };
+                   waiters: store.waiters(c.resource).map(({ resource: _r, ...w }) => w) })),
+                ...sc.map((c) => ({ resource: c.spelled, key: c.resource, holder: c.holder_thread, server: c.holder_server,
+                   shared: true, reason: c.reason, claimed_ts: c.claimed, expires_ts: c.expires, released_ts: null,
+                   released_by: null, waiters: c.waiters }))]) };
             }
-            return { exitCode: 0, stdout: rows.length
-              ? rows.map((c) => [fmtClaim(c, now), ...store.waiters(c.resource).map(fmtWaiter)].join("\n")).join("\n")
-              : "no claims" };
+            const lines = [...rows.map((c) => [fmtClaim(c, now), ...store.waiters(c.resource).map(fmtWaiter)].join("\n")),
+              ...sc.map((c) => fmtSharedClaim(c, now))];
+            return { exitCode: 0, stdout: lines.length ? lines.join("\n") : "no claims" };
           }
 
           case "claim": {
@@ -309,6 +433,53 @@ export default async function plugin(bb: BbPluginApi) {
             if ("error" in maxWait) return fail(`--max-wait: ${maxWait.error}`);
             await sweep(mine);
             const now = new Date();
+            if (p.shared) {
+              if (p.resource.startsWith("path:")) {
+                return fail(`bus: a path: claim cannot be shared — the same path means different things on different servers. Claim it without --shared.`);
+              }
+              const cfg = await sharedCfg();
+              if (!cfg) return fail(NOT_CONFIGURED);
+              if (!shared.joined(mine)) return fail(`bus: ${mine} has not joined the shared space, so it cannot hold a shared claim. bb bus join --description '<one line>'`);
+              // A LOCAL holder on this server blocks a shared claim on the same name (spec §5).
+              const local = store.getClaim(k.key);
+              if (local && local.released_ts === null && now.getTime() < Date.parse(local.expires_ts) && local.holder !== mine) {
+                markRead();
+                return { exitCode: RC_BUSY, stdout: `busy ${local.holder} ${local.reason} expires ${local.expires_ts}`,
+                  stderr: `bus: ${local.holder} holds ${shown(local)} LOCALLY on this server; a shared claim on it waits until that is released.` };
+              }
+              let r;
+              try {
+                r = await cfg.client.claim({ thread: mine, resource: k.key, spelled: p.resource, reason: p.reason,
+                  ttl_ms: ttl.ms, wait: p.wait, max_wait_ms: maxWait.ms });
+              } catch (e) {
+                markRead();
+                return relayFail(e, "a shared claim never falls back to a local one, so NOTHING is held");
+              }
+              markRead();
+              const h = `${r.claim.holder_thread}@${r.claim.holder_server}`;
+              if (r.result === "held") {
+                shared.upsertClaim(r.claim);
+                return { exitCode: 0, stdout: `held ${p.resource} (shared) until ${r.claim.expires}` +
+                  (r.took_from ? `\n  taken from ${r.took_from.thread}@${r.took_from.server}, whose claim had expired — it was told.` : "") };
+              }
+              if (r.result === "waiting") {
+                return { exitCode: RC_BUSY, stdout: `waiting ${r.position} for ${h} ${r.claim.reason} expires ${r.claim.expires}`,
+                  stderr: `bus: you are #${r.position} on the shared wait list for ${r.claim.spelled}, dropped at ${r.waiter.expires}. ` +
+                    `When it is yours a [bus … claim] message says GRANTED — then re-run this claim. Leave the list: bb bus release ${p.resource} --shared` };
+              }
+              if (r.result === "contended") return { exitCode: RC_BUSY, stdout: `contended ${p.resource}`, stderr: `bus: ${r.error}` };
+              return { exitCode: RC_BUSY, stdout: `busy ${h} ${r.claim.reason} expires ${r.claim.expires}`,
+                stderr: `bus: ${h} holds ${r.claim.spelled} in the shared space. It was told you are waiting. To queue for it in order: add --wait.` };
+            }
+            // A SHARED holder blocks a local claim on the same name, read from this server's
+            // copy of the shared claims — so a local claim still makes no network call.
+            const sh = shared.claim(k.key);
+            if (liveShared(sh, now) && sh.holder_thread !== mine) {
+              markRead();
+              return { exitCode: RC_BUSY, stdout: `busy ${sh.holder_thread}@${sh.holder_server} ${sh.reason} expires ${sh.expires}`,
+                stderr: `bus: ${sh.holder_thread}@${sh.holder_server} holds ${sh.spelled} SHARED (this server's copy of the shared claims, ` +
+                  `as of ${shared.getMeta("synced_at") ?? "never"}). A local claim cannot take it.` };
+            }
             // A re-claim of what you hold IS a renewal; refused while anyone waits (MX-1394).
             const no = renewalRefused({ existing: store.getClaim(k.key), waiters: store.waiters(k.key),
               caller: mine, confirming: true, now });
@@ -374,10 +545,23 @@ export default async function plugin(bb: BbPluginApi) {
           }
 
           case "heartbeat": {
-            const resource = argv[1];
-            if (!resource) return fail("usage: bb bus heartbeat <resource>");
+            const hargs = argv.filter((a) => a !== "--shared");
+            const resource = hargs[1];
+            if (!resource) return fail("usage: bb bus heartbeat <resource> [--shared]");
             const hk = claimKey(resource, ctx.cwd ?? null);
             if ("error" in hk) return fail(hk.error);
+            if (argv.includes("--shared")) {
+              const cfg = await sharedCfg();
+              if (!cfg) return fail(NOT_CONFIGURED);
+              let r;
+              try { r = await cfg.client.heartbeat(mine, hk.key); } catch (e) { markRead(); return relayFail(e, "the shared claim was NOT extended"); }
+              markRead();
+              if (r.result === "held") {
+                shared.upsertClaim(r.claim);
+                return { exitCode: 0, stdout: `held ${resource} (shared) until ${r.claim.expires}` };
+              }
+              return { exitCode: RC_BUSY, stderr: `bus: ${"error" in r ? r.error : r.result}` };
+            }
             await sweep(mine);
             const existing = store.getClaim(hk.key);
             // The original ttl, so a heartbeat extends by what was asked for rather than
@@ -396,13 +580,26 @@ export default async function plugin(bb: BbPluginApi) {
           }
 
           case "release": {
-            const resource = argv[1];
-            if (!resource) return fail("usage: bb bus release <resource> [--force --reason '<why>']");
+            const rargs = argv.filter((a) => a !== "--shared");
+            const resource = rargs[1];
+            if (!resource) return fail("usage: bb bus release <resource> [--force --reason '<why>'] [--shared]");
             const force = argv.includes("--force");
             const ri = argv.indexOf("--reason");
             const reason = ri >= 0 ? argv[ri + 1] ?? null : null;
             const rk = claimKey(resource, ctx.cwd ?? null);
             if ("error" in rk) return fail(rk.error);
+            if (argv.includes("--shared")) {
+              const cfg = await sharedCfg();
+              if (!cfg) return fail(NOT_CONFIGURED);
+              let r;
+              try { r = await cfg.client.release({ thread: mine, resource: rk.key, force, reason }); } catch (e) { markRead(); return relayFail(e, "NOTHING was released"); }
+              markRead();
+              if (r.result === "left-wait-list") return { exitCode: 0, stdout: `left the shared wait list for ${resource}` };
+              shared.dropClaim(rk.key);
+              return { exitCode: 0, stdout: `released ${resource} (shared)` +
+                (r.notified ? ` (forced; ${r.notified.thread}@${r.notified.server} was told)` : "") +
+                (r.granted ? `\n  granted to ${r.granted.thread}@${r.granted.server}, first on its wait list — it was told.` : "") };
+            }
             // Leaving the wait list is a release of your PLACE (MX-1390).
             if (!force && store.waiters(rk.key).some((w) => w.waiter === mine) &&
                 store.getClaim(rk.key)?.holder !== mine) {
@@ -413,7 +610,11 @@ export default async function plugin(bb: BbPluginApi) {
             }
             await sweep(mine);
             const r = release({ existing: store.getClaim(rk.key), caller: mine, force, reason, now: new Date() });
-            if ("error" in r) { markRead(); return fail(r.error); }
+            if ("error" in r) {
+              markRead();
+              const sh = shared.claim(rk.key);
+              return fail(r.error + (sh && sh.holder_thread === mine ? `\n  you hold it SHARED: bb bus release ${resource} --shared` : ""));
+            }
             store.putClaim(r.row);
             if (r.notifyHolder) {
               const e = validate({ kind: "release", to: r.notifyHolder, ref: null,
@@ -432,19 +633,61 @@ export default async function plugin(bb: BbPluginApi) {
             if ("error" in f) return fail(f.error);
             if (f.unread === UNREAD_SELF) f.unread = mine;
             const rows = store.log(f);
+            // Crossed rows, marked x<id> and thread@server, merged in time order (MX-1528).
+            const srows = my ? shared.log(f, my) : [];
             markRead();
-            if (argv.includes("--json")) return { exitCode: 0, stdout: JSON.stringify(rows) };
-            return { exitCode: 0, stdout: rows.length ? rows.map(fmtMessage).join("\n") : "nothing matches" };
+            type Item = { ts: string; local?: MessageRow; crossed?: SharedRow };
+            const items: Item[] = [...rows.map((r) => ({ ts: r.created_ts, local: r })),
+              ...srows.map((r) => ({ ts: r.created_ts, crossed: r }))]
+              .sort((a, b) => (a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : 0)).slice(-f.limit);
+            if (argv.includes("--json")) {
+              return { exitCode: 0, stdout: JSON.stringify(items.map((i) => i.local ?? {
+                ...i.crossed!, seq: `x${i.crossed!.relay_id}`, from_thread: `${i.crossed!.from_thread}@${i.crossed!.from_server}`,
+                to_addr: `${i.crossed!.to_thread}@${i.crossed!.to_server}`, shared: true })) };
+            }
+            return { exitCode: 0, stdout: items.length
+              ? items.map((i) => (i.local ? fmtMessage(i.local) : fmtShared(i.crossed!))).join("\n") : "nothing matches" };
           }
 
           case "unanswered": {
             const mi = argv.indexOf("--minutes");
             const minutes = mi >= 0 ? parseInt(argv[mi + 1] ?? "30", 10) || 30 : 30;
             const rows = store.unanswered(minutes, new Date());
+            const srows = my ? shared.unanswered(minutes, new Date()) : [];
             markRead();
-            if (!rows.length) return { exitCode: 0, stdout: `nothing unanswered older than ${minutes}m` };
+            if (!rows.length && !srows.length) return { exitCode: 0, stdout: `nothing unanswered older than ${minutes}m` };
             return { exitCode: 0,
-              stdout: rows.map((m) => `${fmtMessage(m)}\n    ack it: bb bus ack --ack-of ${m.seq} --answer '<one line>'`).join("\n") };
+              stdout: [...rows.map((m) => `${fmtMessage(m)}\n    ack it: bb bus ack --ack-of ${m.seq} --answer '<one line>'`),
+                ...srows.map((m) => `${fmtShared(m)}\n    ` + (m.to_server === my
+                  ? `ack it: bb bus ack --ack-of x${m.relay_id} --answer '<one line>'`
+                  : `awaiting ${m.to_thread}@${m.to_server}`))].join("\n") };
+          }
+
+          case "join": {
+            const j = parseJoin(argv);
+            if ("error" in j) return fail(j.error);
+            const cfg = await sharedCfg();
+            if (!cfg) return fail(NOT_CONFIGURED);
+            let peer;
+            try { peer = await cfg.client.join(mine, j.description); } catch (e) { return relayFail(e, "you have NOT joined"); }
+            shared.join(mine, j.description, peer.joined);
+            markRead();
+            return { exitCode: 0, stdout: `joined the shared space as ${mine}@${cfg.server}: "${j.description}"\n` +
+              `  every server now sees this thread. What you send across is your call alone: nothing personal, no memories.\n` +
+              `  leave with: bb bus leave` };
+          }
+
+          case "leave": {
+            if (argv.length > 1) return fail("usage: bb bus leave");
+            const cfg = await sharedCfg();
+            if (!cfg) return fail(NOT_CONFIGURED);
+            let r;
+            try { r = await cfg.client.leave(mine, "left"); } catch (e) { return relayFail(e, "you are STILL in the shared space"); }
+            shared.leave(mine);
+            markRead();
+            return { exitCode: 0, stdout: r.left
+              ? `left the shared space; ${r.released} shared claim(s) released`
+              : `you were not in the shared space` };
           }
 
           case "send": case "help": default: {
@@ -467,7 +710,19 @@ export default async function plugin(bb: BbPluginApi) {
             // is the only correct answer, and making a human retype it is how an ack goes
             // to the wrong thread and the question stays open.
             let tos = p.to;
-            if (p.kind === "ack" && p.ackOf !== null) {
+            if (p.kind === "ack" && p.ackOf !== null && p.ackOfShared) {
+              // A CROSSED row is acked back across, to the thread@server that asked it.
+              const target = shared.getMessage(p.ackOf);
+              if (!target) return fail(`bus: no crossed message x${p.ackOf} on this server`);
+              if (!my || target.to_server !== my) {
+                return fail(`bus: x${p.ackOf} was sent FROM this server; only its recipient acks it`);
+              }
+              const asker = `${target.from_thread}@${target.from_server}`;
+              if (tos.length > 1 || (tos[0] && tos[0] !== asker)) {
+                return fail(`bus: x${p.ackOf} came from ${asker} — an ack goes back to the asker`);
+              }
+              tos = [asker];
+            } else if (p.kind === "ack" && p.ackOf !== null) {
               const target = store.getMessage(p.ackOf);
               if (!target) return fail(`bus: no message #${p.ackOf} to ack`);
               if (tos.length > 1) {
@@ -486,11 +741,31 @@ export default async function plugin(bb: BbPluginApi) {
             // three outcomes because the sender cannot tell what arrived. MX-852.
             const seen = new Set<string>();
             const recipients: string[] = [];
+            // thread@server recipients in the shared space; a bare id keeps its local path.
+            const remote = new Map<string, { thread: string; server: string }>();
+            const cfg = tos.some((t) => t.includes("@")) ? await sharedCfg() : null;
             for (const t of tos) {
               // A repeat is dropped rather than refused: `--to A --to A` plainly means one
               // message to A, and two identical envelopes would each demand their own ack.
               if (seen.has(t)) continue;
               seen.add(t);
+              if (t.includes("@")) {
+                const a = parseAddress(t, cfg?.server ?? null);
+                if ("error" in a) return fail(`${a.error}\n  NOTHING was sent: every --to is checked before any is delivered.`);
+                if (a.kind === "remote") {
+                  remote.set(t, a);
+                  recipients.push(t);
+                  continue;
+                }
+                // `thr_x@<this server>` is local: it continues below as the bare id.
+                if (seen.has(a.thread)) continue;
+                seen.add(a.thread);
+                if (!(await knownThread(a.thread))) {
+                  return fail(`bus: '${a.thread}' is not a thread bb knows — refusing. NOTHING was sent.`);
+                }
+                recipients.push(a.thread);
+                continue;
+              }
               if (!(await knownThread(t))) {
                 return fail(
                   `bus: '${t}' is not a thread bb knows — refusing rather than delivering to a stranger.\n` +
@@ -499,6 +774,23 @@ export default async function plugin(bb: BbPluginApi) {
                 );
               }
               recipients.push(t);
+            }
+            // EVERY REMOTE ADDRESS IS CHECKED BEFORE ANYTHING IS SENT, the same rule as local
+            // ones (MX-852): the sender must have joined, and each recipient must be joined.
+            if (remote.size) {
+              if (!shared.joined(mine)) {
+                return fail(`bus: ${mine} has not joined the shared space, so it cannot send across. ` +
+                  `bb bus join --description '<one line>' — and decide for yourself whether this needs to cross.\n  NOTHING was sent.`);
+              }
+              let peers;
+              try { peers = await cfg!.client.peers(); } catch (e) { return relayFail(e, "NOTHING was sent"); }
+              shared.setPeers(peers);
+              for (const [t, a] of remote) {
+                if (!peers.some((x) => x.thread === a.thread && x.server === a.server)) {
+                  return fail(`bus: '${t}' is not in the shared space — refused, never queued for later. ` +
+                    `bb bus peers lists who has joined.\n  NOTHING was sent: every --to is checked before any is delivered.`);
+                }
+              }
             }
 
             let body: string | null = null;
@@ -521,6 +813,21 @@ export default async function plugin(bb: BbPluginApi) {
             for (const t of recipients) {
               const v = t === recipients[0] ? first : validate({ kind: p.kind, to: t, ref: p.ref, fields: p.fields, body, ackOf: p.ackOf });
               if (!v.ok) return fail(v.error);
+              const a = remote.get(t);
+              if (a) {
+                try {
+                  const m = await cfg!.client.send({ from_thread: mine, to_thread: a.thread, to_server: a.server,
+                    kind: v.envelope.kind, ref: v.envelope.ref, fields: v.envelope.fields, body: v.envelope.body,
+                    ack_of: p.ackOfShared ? v.envelope.ackOf : null });
+                  shared.putMessage(m, false, m.created);
+                  parts.push({ stdout: `relayed x${m.id} ${m.kind} -> ${t}` +
+                    (m.ack_required ? `\n  awaiting an ack — bb bus unanswered lists it if none comes.` : ""), stderr: null, exitCode: 0 });
+                } catch (e) {
+                  const r = relayFail(e, "this one was NOT sent");
+                  parts.push({ stdout: `not delivered: ${v.envelope.kind} -> ${t}`, stderr: r.stderr, exitCode: r.exitCode as 0 | 1 });
+                }
+                continue;
+              }
               const { seq, outcome } = await post(mine, v.envelope);
               parts.push(receipt({ seq, kind: v.envelope.kind, to: t, outcome, ackRequired: v.envelope.ackRequired }));
             }
@@ -529,7 +836,8 @@ export default async function plugin(bb: BbPluginApi) {
             // how three dropped recipients read as success in the first place.
             const stdout = parts.map((r) => r.stdout).join("\n");
             const stderr = parts.map((r) => r.stderr).filter(Boolean).join("\n");
-            const exitCode = parts.some((r) => r.exitCode !== 0) ? 1 : 0;
+            const exitCode = parts.some((r) => (r.exitCode as number) === RC_UNREACHABLE) ? RC_UNREACHABLE
+              : parts.some((r) => r.exitCode !== 0) ? 1 : 0;
             return stderr ? { exitCode, stdout, stderr } : { exitCode, stdout };
           }
         }
@@ -547,11 +855,12 @@ function helpText(): string {
   return [
     "bb bus — typed peer bus between bb threads. One stream, no rooms.",
     "",
-    "  claim <resource> --reason <r> [--ttl 30m] [--wait [--max-wait 2h]] · heartbeat <r> · release <r> [--force --reason '<why>'] · claims [--stale] [--mine]",
+    "  claim <resource> --reason <r> [--ttl 30m] [--wait [--max-wait 2h]] [--shared] · heartbeat <r> [--shared] · release <r> [--force --reason '<why>'] [--shared] · claims [--stale] [--mine]",
     "  log [--kind K] [--ref R] [--from T] [--to T] [--since <ts>] [--unread] [-n N] · unanswered [--minutes N] · build",
+    "  shared space across servers: join --description '<one line>' · leave · peers · --to <thread-id>@<server> · --ack-of x<n>",
     "",
-    "  send --kind <kind> --to <id> [--ref <ref>] [--field k=v]… [--body - | --body-file <p>]",
-    "  the body comes from stdin or a file, NEVER from argv — your shell would substitute it first.",
+    "  send --kind <kind> --to <id>[@<server>] [--ref <ref>] [--field k=v]… [--body-file <p>]",
+    "  the body comes from a file, NEVER from argv — your shell would substitute it first.",
     "",
     "  the twelve kinds (ack = someone owes you an answer; imm = steers a live turn):",
     ...KIND_NAMES.map((k) => {

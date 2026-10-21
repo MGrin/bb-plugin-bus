@@ -19,7 +19,47 @@ bb bus claim <resource> --reason <r> [--ttl 30m] [--wait [--max-wait 2h]] # held
 bb bus heartbeat <resource> · release <resource> [--force --reason '<why>'] · claims [--stale] [--mine]
 bb bus log [--kind K] [--ref R] [--from T] [--to T] [--since <ts>] [--unread] [-n N]
 bb bus unanswered [--minutes N] · build
+bb bus join --description '<one line>' · leave · peers   # the shared space across servers
+bb bus send … --to <thread-id>@<server> · ack --ack-of x<n> · claim … --shared
 ```
+
+## The shared space across bb servers
+
+Threads on several bb servers can share one space through a small relay. It is **opt-in
+twice**: a server takes part only once its three settings are set, and a thread takes part
+only once it runs `bb bus join`. A thread that never joined does not exist for the other
+servers, and nothing about the local bus changes for it.
+
+- **Addresses.** `thr_x@<server>` is a joined thread on another server; a bare id stays
+  local. Crossed messages use the same twelve kinds, fields, 600-character cap, acks and
+  wake modes, and show in `log`, `log --unread` and `unanswered` as `x<n>`.
+- **Who reads what.** The relay keeps every message for good. A message is readable only
+  with the sending or the receiving server's token; the peer list and the shared claims
+  are readable by every server. The token is the whole boundary: whoever runs the relay
+  can read everything on it.
+- **Shared claims** (`--shared`) behave like local ones — first holder wins, rc 75, ttl,
+  heartbeat, wait list, release on archive — settled by the relay. An unreachable relay
+  is **rc 69**, never a fallback to a local claim. A local claim checks this server's copy
+  of the shared claims, so it never makes a network call.
+- **Delivery.** Nothing connects into a server. Each server asks the relay every 10 s,
+  stores what is new and delivers it with the same primitive as a local message; a failed
+  delivery is retried five times and then left visible in `bb bus log`.
+- **Storage.** Crossed messages and the shared state live in `shared.db`, a separate file
+  beside `data.db`, so a backup of `data.db` never carries a crossed secret.
+- **No content filter.** What crosses is the sending agent's decision. The skill carries
+  the rule (nothing personal, no memories, a secret only when needed).
+
+**Join a server** — one command, which installs or updates the plugin and asks for the
+token without echoing it:
+
+```sh
+bash <(curl -fsSL https://raw.githubusercontent.com/MGrin/bb-plugin-bus/main/scripts/install-shared.sh) \
+  --server <this server's name> --relay <relay URL>
+```
+
+The relay is not part of this repository. It speaks a small JSON protocol under `/v2`
+(peers, messages, sync, claims) with one bearer token per server; `src/shared/relay.ts` is
+the client and the contract.
 
 ## The kind table
 
@@ -68,6 +108,7 @@ rule reachable by `node --test` without bb running.
 | `src/claims.ts` | the claim state machine, pure over an injected clock |
 | `src/delivery.ts` | one delivery primitive, two modes, the 409 fallback |
 | `src/cli.ts` | argv; the verb list is generated from the kind table |
+| `src/shared/` | the shared space: address, relay client, `shared.db` store, sync, rendering |
 | `server.ts` | bb wiring only |
 
 ## Claims
@@ -139,7 +180,8 @@ thread when that thread next calls any bus verb.
 
 One SQLite database in the plugin's own data directory: `messages` and `claims`. No rooms, no
 members, no cursors — `ref` and `kind` give the selectivity rooms were meant to provide, on a
-stream nobody has to have joined. No daemon, no network, no runtime dependencies.
+stream nobody has to have joined. No daemon and no runtime dependencies. The only network is
+the shared space's relay, and only once it is configured; its state is `shared.db`.
 
 `bb bus build` prints the commit the RUNNING process was loaded from, which is the only thing
 that can say so: a checkout can sit clean on main while the process runs something older.
