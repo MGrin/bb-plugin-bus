@@ -88,7 +88,7 @@ test("unanswered: ack-required crossed rows with no crossed ack", () => {
 
 test("peers, claims, joined, pending leaves and meta round-trip", () => {
   const { s, done } = fresh();
-  s.setPeers([{ thread: "thr_m", server: "beta", description: "marco", joined: "t" }]);
+  s.setPeers([{ thread: "thr_m", server: "beta", description: "peer", joined: "t" }]);
   deepStrictEqual(s.peers().map((p) => p.thread), ["thr_m"]);
   s.setPeers([]);
   deepStrictEqual(s.peers(), []);

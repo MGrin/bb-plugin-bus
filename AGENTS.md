@@ -1,4 +1,4 @@
-<!-- agents-md ceiling: 56 lines -->
+<!-- agents-md ceiling: 60 lines -->
 # AGENTS.md — bb-plugin-bus
 
 A typed peer bus between bb threads: twelve closed message kinds, TTL'd resource claims,
@@ -42,9 +42,13 @@ the one a contributor reads first. The single fact that governs edits here:
   in, and `src/suite.test.ts` asserts that list against the directory — a suite file
   nothing runs is a test nobody has. **There is no second list of kinds**: adding one is a
   row in `src/kinds.ts` and a test.
-- **Nothing here waits, blocks or polls.** Delivery is the bb server's job; a listener, a
-  poller or a queue drain breaks the property the design rests on — that a session cannot
-  silently go deaf. The one exception is the wait list's single expiry timer (MX-1390).
+- **Nothing here waits, blocks or polls** — for the LOCAL bus. Delivery is the bb server's
+  job; a listener, a poller or a queue drain breaks the property the design rests on — that
+  a session cannot silently go deaf. Two exceptions: the wait list's single expiry timer
+  (MX-1390), and the shared space's sync service (MX-1528), which exists because nothing may
+  connect into a server, does nothing until configured, and logs every failure.
+- **Nothing deployment-specific in this public repo**: no host, server or person names as
+  defaults in code or README. The shared space takes all of that from settings.
 - **Two facts about bb that constrain every change here** — a body can only come from
   `--body-file` (bb forwards neither argv-safe prose nor stdin to a plugin CLI), and
   `queue` still wakes an idle thread. Both are measured, with their incidents, in

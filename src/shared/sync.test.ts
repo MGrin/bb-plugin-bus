@@ -66,7 +66,7 @@ test("a failed delivery is retried on the next sync, and given up after five", a
 });
 
 test("peers and claims are replaced from every sync", async () => {
-  const peer = { thread: "thr_m", server: "beta", description: "marco", joined: "t" };
+  const peer = { thread: "thr_m", server: "beta", description: "peer", joined: "t" };
   const s = setup([page([], { peers: [peer] }), page([], { peers: [] })]);
   await s.run();
   deepStrictEqual(s.store.peers(), [peer]);
