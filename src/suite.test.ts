@@ -19,10 +19,12 @@ test("every unit test file is named in package.json's test script", () => {
     scripts: Record<string, string>;
   };
   const script = pkg.scripts.test!;
-  const onDisk = readdirSync(new URL("src", root))
+  // RECURSIVE: src/shared/ (MX-1528) is a directory of its own, and a flat read of src/
+  // would let every test in it go unrun without this check noticing.
+  const onDisk = (readdirSync(new URL("src", root), { recursive: true }) as string[])
     .filter((f) => f.endsWith(".test.ts") && !f.includes(".integration."))
     .sort();
-  const named = [...script.matchAll(/src\/([\w.-]+\.test\.ts)/g)].map((m) => m[1]!).sort();
+  const named = [...script.matchAll(/src\/([\w./-]+\.test\.ts)/g)].map((m) => m[1]!).sort();
   deepStrictEqual(named, onDisk,
     "package.json's test script and src/ disagree — a test file nobody runs is a test nobody has");
 });

@@ -15,13 +15,13 @@ export interface Command {
 
 const FIXED: readonly Command[] = [
   { name: "send", summary: "Send a typed message",
-    usage: "bb bus send --kind <kind> --to <thread-id> [--ref <ref>] [--field k=v]… [--body - | --body-file <p>]" },
-  { name: "claim", summary: "Take a resource exclusively; --wait joins its FIFO wait list",
-    usage: "bb bus claim <resource> --reason <r> [--ttl 30m] [--wait [--max-wait 2h]]" },
+    usage: "bb bus send --kind <kind> --to <thread-id>[@<server>] [--ref <ref>] [--field k=v]… [--body-file <p>]" },
+  { name: "claim", summary: "Take a resource exclusively; --wait joins its FIFO wait list; --shared across servers",
+    usage: "bb bus claim <resource> --reason <r> [--ttl 30m] [--wait [--max-wait 2h]] [--shared]" },
   { name: "heartbeat", summary: "Extend your claim by its ttl",
-    usage: "bb bus heartbeat <resource>" },
+    usage: "bb bus heartbeat <resource> [--shared]" },
   { name: "release", summary: "Release a resource you hold",
-    usage: "bb bus release <resource> [--force --reason '<why>']" },
+    usage: "bb bus release <resource> [--force --reason '<why>'] [--shared]" },
   { name: "claims", summary: "List claims, and who waits for each since when",
     usage: "bb bus claims [--stale] [--mine]" },
   { name: "log", summary: "Query history (the only read of it)",
@@ -30,6 +30,13 @@ const FIXED: readonly Command[] = [
     usage: "bb bus unanswered [--minutes N]" },
   { name: "build", summary: "Which commit this RUNNING process was loaded from",
     usage: "bb bus build [--json]" },
+  // The shared space across bb servers (MX-1528). A thread is in it only if it joined.
+  { name: "join", summary: "Join the shared space across servers, with a one-line description you write",
+    usage: "bb bus join --description '<what this thread does, one line>'" },
+  { name: "leave", summary: "Leave the shared space; your shared claims are released",
+    usage: "bb bus leave" },
+  { name: "peers", summary: "Threads joined to the shared space, on every server, as the relay sees them",
+    usage: "bb bus peers [--json]" },
 ];
 
 /** `blocked_on` is a field name; `--blocked-on` is how it is typed. One conversion. */
@@ -70,6 +77,8 @@ export interface ParsedSend {
   fields: Record<string, string>;
   bodySource: BodySource | null;
   ackOf: number | null;
+  /** `--ack-of x<n>`: the acked row is a CROSSED message, relay id n (MX-1528). */
+  ackOfShared: boolean;
   error: string | null;
 }
 
@@ -117,7 +126,7 @@ const STDIN_DOES_NOT_REACH_THE_PLUGIN =
   "    bb bus <verb> … --body-file /tmp/msg";
 
 const blank = (): ParsedSend => ({
-  kind: "", to: [], ref: null, fields: {}, bodySource: null, ackOf: null, error: null,
+  kind: "", to: [], ref: null, fields: {}, bodySource: null, ackOf: null, ackOfShared: false, error: null,
 });
 
 /** Pull `--flag value` pairs; anything positional after the verb is the argv-body error. */
@@ -137,6 +146,15 @@ function walk(
   return null;
 }
 
+/** `--ack-of 42` is this server's row; `--ack-of x42` is the relay's crossed row 42. */
+function setAckOf(p: ParsedSend, v: string): string | null {
+  const m = /^(x?)(\d+)$/.exec(v);
+  if (!m) return `bus: --ack-of must be a number, or x<number> for a crossed message, got '${v}'`;
+  p.ackOf = Number(m[2]);
+  p.ackOfShared = m[1] === "x";
+  return null;
+}
+
 function setBody(p: ParsedSend, flag: string, v: string): string | null {
   if (flag === "--body") return STDIN_DOES_NOT_REACH_THE_PLUGIN;
   p.bodySource = { kind: "file", path: v };
@@ -150,12 +168,7 @@ export function parseSend(argv: readonly string[]): ParsedSend {
       case "--kind": p.kind = v; return null;
       case "--to": p.to.push(v); return null;
       case "--ref": p.ref = v; return null;
-      case "--ack-of": {
-        const n = Number(v);
-        if (!Number.isInteger(n)) return `bus: --ack-of must be a number, got '${v}'`;
-        p.ackOf = n;
-        return null;
-      }
+      case "--ack-of": return setAckOf(p, v);
       case "--field": {
         const eq = v.indexOf("=");
         if (eq <= 0) return `bus: --field takes k=v, got '${v}'`;
@@ -193,12 +206,7 @@ export function parseSugar(verb: string, argv: readonly string[]): ParsedSend {
     if (!allowed.has(flag)) {
       return `bus: ${verb} has no flag '${flag}'.\n  schema: ${schemaLine(kind)}`;
     }
-    if (flag === "--ack-of") {
-      const n = Number(v);
-      if (!Number.isInteger(n)) return `bus: --ack-of must be a number, got '${v}'`;
-      p.ackOf = n;
-      return null;
-    }
+    if (flag === "--ack-of") return setAckOf(p, v);
     p.fields[fieldOf(flag)] = v;
     return null;
   });
@@ -240,7 +248,7 @@ export const CLAIM_USAGE = "usage: bb bus claim <resource> --reason <r> [--ttl 3
 
 export function parseClaim(
   argv: readonly string[],
-): { resource: string; ttl: string; reason: string; wait: boolean; maxWait: string } | { error: string } {
+): { resource: string; ttl: string; reason: string; wait: boolean; maxWait: string; shared: boolean } | { error: string } {
   const resource = argv[1];
   if (!resource || resource.startsWith("-")) {
     return { error: CLAIM_USAGE };
@@ -248,11 +256,13 @@ export function parseClaim(
   let ttl = "30m";
   let reason = "";
   let wait = false;
+  let shared = false;
   let maxWait: string | null = null;
   for (let i = 2; i < argv.length; i++) {
     const w = argv[i]!;
     // `--wait` is the one flag here with no value (MX-1390).
     if (w === "--wait") { wait = true; continue; }
+    if (w === "--shared") { shared = true; continue; }
     const v = argv[i + 1];
     if (v === undefined) return { error: `bus: ${w} needs a value` };
     i++;
@@ -269,5 +279,20 @@ export function parseClaim(
   if (maxWait !== null && !wait) {
     return { error: "bus: --max-wait only means something with --wait" };
   }
-  return { resource, ttl, reason, wait, maxWait: maxWait ?? "2h" };
+  return { resource, ttl, reason, wait, maxWait: maxWait ?? "2h", shared };
+}
+
+/** The most a joined thread may say about itself. One line: the peer list prints it. */
+export const DESCRIPTION_CAP = 200;
+
+export function parseJoin(argv: readonly string[]): { description: string } | { error: string } {
+  const usage = "usage: bb bus join --description '<what this thread does, one line>'";
+  if (argv.length !== 3 || argv[1] !== "--description") return { error: usage };
+  const d = argv[2]!.trim();
+  if (!d) return { error: usage };
+  if (/[\r\n]/.test(d)) return { error: "bus: the description is ONE line — the peer list prints it on one" };
+  if (d.length > DESCRIPTION_CAP) {
+    return { error: `bus: the description is ${d.length} characters; the cap is ${DESCRIPTION_CAP}` };
+  }
+  return { description: d };
 }

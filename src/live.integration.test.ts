@@ -53,7 +53,9 @@ const alive = (() => {
   // plugin. That one fell through to its help text and exited 0 for any verb it did not
   // know, so `bus claims` answered 0 while `claims` did not exist. The probe has to read
   // something the old CLI cannot produce: JSON.
-  const r = bb(["bus", "claims", "--json"]);
+  // `--mine`: the whole ledger outgrew bb's 1 MiB plugin-CLI output cap (2,038,331 bytes on
+  // 2026-10-21), so the unfiltered probe failed and this suite SKIPPED on a live bb.
+  const r = bb(["bus", "claims", "--mine", "--json"]);
   if (r.rc !== 0) return false;
   try {
     return Array.isArray(JSON.parse(r.stdout || "null"));
@@ -214,11 +216,11 @@ suite("a real bb, two real threads", () => {
     const second = bb(["bus", "claim", resource, "--reason", "live suite second"]);
     strictEqual(second.rc, 0, "re-claiming what you hold must be idempotent");
 
-    const held = rows(["bus", "claims"]).find((c) => c.resource === resource);
+    const held = rows(["bus", "claims", "--mine"]).find((c) => c.resource === resource);
     ok(held, "the claim must be in the store");
     strictEqual(held.holder, me);
     strictEqual(bb(["bus", "release", resource]).rc, 0);
-    const after = rows(["bus", "claims"]).find((c) => c.resource === resource);
+    const after = rows(["bus", "claims", "--mine"]).find((c) => c.resource === resource);
     ok(after!.released_ts !== null, "release must be recorded, not deleted");
   });
 
@@ -284,6 +286,8 @@ suite("a real bb, two real threads", () => {
     const line = /^Resources are (.+)$/m.exec(md);
     ok(line, "the skill must state the resource vocabulary");
     const listed = [...line[1]!.matchAll(/`([a-z]+):/g)].map((m) => `${m[1]!}:`);
-    deepStrictEqual(listed.sort(), [...RESOURCE_PREFIXES].sort());
+    // A SET: the line spells `pr:` twice (`pr:n` and `pr:owner/repo#n`, MX-1312), and the
+    // duplicate is a second spelling of one prefix, not a seventh prefix.
+    deepStrictEqual([...new Set(listed)].sort(), [...RESOURCE_PREFIXES].sort());
   });
 });

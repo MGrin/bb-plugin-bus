@@ -3,12 +3,12 @@
   "version": "0.1.0",
   "type": "module",
   "engines": {
-    "bb": ">=0.36",
+    "bb": ">=0.46",
     "bbPluginSdk": ">=0.4.8"
   },
   "bb": {
     "name": "Bus",
-    "description": "Typed peer bus between bb threads: twelve message kinds, TTL'd resource claims, delivery on bb's own send primitive. One stream, no rooms.",
+    "description": "Typed peer bus between bb threads: twelve message kinds, TTL'd resource claims, delivery on bb's own send primitive. One stream, no rooms; an opt-in shared space across bb servers.",
     "branding": {
       "icon": "Radio"
     },
@@ -34,7 +34,7 @@
     "url": "git+https://github.com/MGrin/bb-plugin-bus.git"
   },
   "scripts": {
-    "test": "node --test --experimental-strip-types src/kinds.test.ts src/refs.test.ts src/envelope.test.ts src/store.test.ts src/claims.test.ts src/paths.test.ts src/delivery.test.ts src/cli.test.ts src/suite.test.ts src/lifecycle.test.ts src/waitlist.test.ts",
+    "test": "node --test --experimental-strip-types src/kinds.test.ts src/refs.test.ts src/envelope.test.ts src/store.test.ts src/claims.test.ts src/paths.test.ts src/delivery.test.ts src/cli.test.ts src/suite.test.ts src/lifecycle.test.ts src/waitlist.test.ts src/shared/address.test.ts src/shared/relay.test.ts src/shared/store.test.ts src/shared/render.test.ts src/shared/sync.test.ts src/shared/server.test.ts",
     "test:live": "node --test --experimental-strip-types src/live.integration.test.ts",
     "typecheck": "tsc --noEmit"
   }

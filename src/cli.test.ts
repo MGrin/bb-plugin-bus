@@ -1,6 +1,6 @@
 import { deepStrictEqual, match, ok, strictEqual } from "node:assert/strict";
 import { test } from "node:test";
-import { COMMANDS, parseClaim, parseLog, parseSend, parseSugar } from "./cli.ts";
+import { COMMANDS, parseClaim, parseJoin, parseLog, parseSend, parseSugar } from "./cli.ts";
 import { KIND_NAMES } from "./kinds.ts";
 
 test("THE SUGAR VERBS ARE GENERATED — every kind has a verb and none is hand-written", () => {
@@ -23,11 +23,46 @@ test("a field with an underscore becomes a dashed flag in the usage line", () =>
   match(COMMANDS.find((c) => c.name === "ack")!.usage, /--ack-of/);
 });
 
-test("the deleted verbs are gone: join, leave, rooms, who, recv", () => {
+test("the deleted verbs are gone: rooms, who, recv", () => {
   const names = COMMANDS.map((c) => c.name);
-  for (const dead of ["join", "leave", "rooms", "who", "recv"]) {
+  for (const dead of ["rooms", "who", "recv"]) {
     ok(!names.includes(dead), `${dead} still exists`);
   }
+});
+
+// MX-1528: `join` and `leave` are back with ANOTHER meaning — the shared space across
+// servers, not a room. A caller still typing the old `bb bus join <room>` is refused,
+// because the new verb takes only --description.
+test("join takes a one-line --description and nothing positional", () => {
+  deepStrictEqual(parseJoin(["join", "--description", "dotfiles operator: machine setup"]),
+    { description: "dotfiles operator: machine setup" });
+  ok("error" in parseJoin(["join", "ops-room"]));
+  ok("error" in parseJoin(["join"]));
+  ok("error" in parseJoin(["join", "--description", "x".repeat(201)]));
+  ok("error" in parseJoin(["join", "--description", "two\nlines"]));
+  for (const v of ["join", "leave", "peers"]) ok(COMMANDS.some((c) => c.name === v), `no verb ${v}`);
+});
+
+test("--ack-of x<n> names a CROSSED message; a bare number stays local", () => {
+  const x = parseSugar("ack", ["ack", "--ack-of", "x42", "--answer", "ok"]);
+  strictEqual(x.error, null);
+  strictEqual(x.ackOf, 42);
+  strictEqual(x.ackOfShared, true);
+  const l = parseSugar("ack", ["ack", "--ack-of", "42", "--answer", "ok"]);
+  strictEqual(l.ackOf, 42);
+  strictEqual(l.ackOfShared, false);
+  ok(parseSugar("ack", ["ack", "--ack-of", "y42", "--answer", "ok"]).error);
+  strictEqual(parseSend(["send", "--kind", "ack", "--ack-of", "x7", "--field", "answer=a", "--to", "t"]).ackOfShared, true);
+});
+
+test("claim --shared is a bare flag and survives beside --wait", () => {
+  const p = parseClaim(["claim", "pr:a/b#1", "--shared", "--reason", "r", "--wait"]);
+  ok(!("error" in p));
+  strictEqual(p.shared, true);
+  strictEqual(p.wait, true);
+  const q = parseClaim(["claim", "pr:1", "--reason", "r"]);
+  ok(!("error" in q));
+  strictEqual(q.shared, false);
 });
 
 test("send parses kind, to, ref and repeated --field k=v", () => {
