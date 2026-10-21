@@ -77,5 +77,12 @@ test("a call that hangs past the timeout is UNREACHABLE", async () => {
     init?.signal?.addEventListener("abort", () => rej(new DOMException("aborted", "AbortError")));
   })) as typeof fetch;
   const c = createRelayClient({ url: "http://r", token: "t", fetch: f, timeoutMs: 20 });
-  await rejects(c.peers(), (e: unknown) => e instanceof RelayUnreachable);
+  // AbortSignal.timeout's timer is unref'd: with nothing else pending, node exits before it
+  // fires (red on CI's Linux, green here). A ref'd timer keeps the loop alive meanwhile.
+  const keep = setTimeout(() => {}, 5000);
+  try {
+    await rejects(c.peers(), (e: unknown) => e instanceof RelayUnreachable);
+  } finally {
+    clearTimeout(keep);
+  }
 });
