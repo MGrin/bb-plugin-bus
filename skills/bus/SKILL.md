@@ -210,6 +210,9 @@ on. A local claim on this server cannot see a local claim on another one. If the
 cannot be reached a shared claim **refuses with rc 69 and holds nothing**; it never falls
 back to a local one. `path:` cannot be shared. On one server, a local claim and a shared
 claim on the same name block each other.
+**To read who holds a shared claim, fresh and without renewing it:** `bb bus lease <r> --shared --json`
+(schema `bb-bus.lease.v1`; rc 0 = relay answered, held or not; rc 2 = blind, never the cache).
+`heartbeat --shared --json` keeps the contended claim in its output (rc 75).
 
 ## Reference a thread as a link
 
