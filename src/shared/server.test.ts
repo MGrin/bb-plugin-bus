@@ -17,7 +17,7 @@ afterEach(() => { globalThis.fetch = realFetch; });
 
 type Req = { method: string; path: string; body: Record<string, unknown> | null };
 
-function fakeRelay(opts: { down?: boolean } = {}) {
+function fakeRelay(opts: { down?: boolean; contend?: boolean } = {}) {
   const reqs: Req[] = [];
   const peers = [{ thread: PEER, server: "beta", description: "peer main", joined: "2026-10-21T00:00:00Z" }];
   const messages: Record<string, unknown>[] = [];
@@ -47,11 +47,22 @@ function fakeRelay(opts: { down?: boolean } = {}) {
       claims.push(c);
       return ok({ result: "held", claim: c, took_from: null });
     }
-    if (r.path.startsWith("/bus/v2/sync")) return ok({ relay: "R", now: "", messages: inbound.splice(0), peers, claims });
+    if (r.path === "/bus/v2/claims/heartbeat") {
+      const c = claims.find((x) => x.resource === r.body!.resource);
+      if (!c) return ok({ error: "no such claim" }, 404);
+      return opts.contend ? ok({ result: "contended", claim: c, error: "somebody waits; not renewed" }) : ok({ result: "held", claim: c });
+    }
+    if (r.path.startsWith("/bus/v2/sync")) return ok({ relay: "R", now: new Date().toISOString(), messages: takeAfter(Number(u.searchParams.get("after") ?? 0)), peers, claims });
     return ok({ error: "not found" }, 404);
   }) as typeof fetch;
   const inbound: Record<string, unknown>[] = [];
-  return { reqs, peers, inbound };
+  /** Like the relay: only messages past `after`; a returned message leaves the queue (the sync service asks again with a cursor). */
+  function takeAfter(after: number) {
+    const out = inbound.filter((m) => (m.id as number) > after);
+    for (const m of out) inbound.splice(inbound.indexOf(m), 1);
+    return out;
+  }
+  return { reqs, peers, inbound, claims };
 }
 
 const SETTINGS = { server: "alpha", relayUrl: "http://relay.test/bus", token: "x".repeat(40) };
@@ -233,4 +244,86 @@ test("archiving a joined thread queues its leave; the next sync tells the relay"
   svc.controller.abort();
   await svc.done;
   deepStrictEqual(relay.reqs.find((q) => q.path === "/bus/v2/peers/leave")!.body, { thread: LOCAL, cause: "thread-archived" });
+});
+
+test("MX-1536 lease: a held shared claim is read from the relay, past every message id, and touches nothing local", async () => {
+  const relay = fakeRelay();
+  const { run } = await host();
+  await run("join", "--description", "ops");
+  strictEqual((await run("claim", "pr:Example/repo#7", "--shared", "--reason", "X-1")).exitCode, 0);
+  const localBefore = JSON.stringify([await run("log", "--json"), await run("claims", "--json")]);
+  const n = relay.reqs.length;
+  const r = await run("lease", "pr:Example/repo#7", "--shared", "--json");
+  strictEqual(r.exitCode, 0, r.stderr);
+  const j = JSON.parse(r.stdout);
+  deepStrictEqual([j.schema, j.relay, j.server, j.resource, j.key, j.held],
+    ["bb-bus.lease.v1", "R", "alpha", "pr:Example/repo#7", "pr:example/repo#7", true]);
+  strictEqual(j.claim.holder_thread, ME);
+  ok(!Number.isNaN(Date.parse(j.relay_now)) && !Number.isNaN(Date.parse(j.fetched_at)));
+  const made = relay.reqs.slice(n);
+  strictEqual(made.length, 1);
+  strictEqual(made[0]!.method, "GET");
+  strictEqual(made[0]!.path, `/bus/v2/sync?after=${Number.MAX_SAFE_INTEGER}`);
+  strictEqual(JSON.stringify([await run("log", "--json"), await run("claims", "--json")]), localBefore);
+});
+
+test("MX-1536 lease: the sync cursor and shared.db are unchanged, and a queued relay message is not consumed", async () => {
+  const relay = fakeRelay();
+  const { run } = await host();
+  await run("join", "--description", "ops");
+  relay.inbound.push({ id: 5, kind: "question", from_thread: PEER, from_server: "beta", to_thread: ME, to_server: "alpha",
+    ref: null, fields: { ask: "q" }, body: null, ack_required: true, ack_of: null, created: new Date().toISOString() });
+  const r = await run("lease", "pr:Example/repo#7", "--shared", "--json");
+  strictEqual(r.exitCode, 0, r.stderr);
+  strictEqual(relay.inbound.length, 1);
+  strictEqual((await run("log", "--json")).stdout, "[]");
+});
+
+test("MX-1536 lease: a free resource reads held:false, claim:null, rc 0", async () => {
+  fakeRelay();
+  const { run } = await host();
+  const r = await run("lease", "pr:Example/repo#9", "--shared", "--json");
+  strictEqual(r.exitCode, 0, r.stderr);
+  const j = JSON.parse(r.stdout);
+  deepStrictEqual([j.held, j.claim], [false, null]);
+});
+
+test("MX-1536 lease: relay down is rc 2 with NOTHING on stdout, and never the cached claim", async () => {
+  fakeRelay();
+  const { run } = await host();
+  await run("join", "--description", "ops");
+  await run("claim", "pr:Example/repo#7", "--shared", "--reason", "X-1");
+  fakeRelay({ down: true });
+  const r = await run("lease", "pr:Example/repo#7", "--shared", "--json");
+  strictEqual(r.exitCode, 2);
+  strictEqual(r.stdout ?? "", "");
+  match(r.stderr, /lease is blind/);
+});
+
+test("MX-1536 lease: not configured is rc 2 blind, and a missing --shared is a usage error", async () => {
+  const relay = fakeRelay();
+  const { run } = await host({});
+  const r = await run("lease", "pr:Example/repo#7", "--shared", "--json");
+  strictEqual(r.exitCode, 2);
+  strictEqual(r.stdout ?? "", "");
+  strictEqual((await run("lease", "pr:Example/repo#7", "--json")).exitCode, 1);
+  deepStrictEqual(relay.reqs, []);
+});
+
+test("MX-1536 heartbeat --shared --json: held prints the receipt; contended keeps rc 75 AND the claim", async () => {
+  fakeRelay();
+  const { run } = await host();
+  await run("join", "--description", "ops");
+  await run("claim", "pr:Example/repo#7", "--shared", "--reason", "X-1");
+  const h = await run("heartbeat", "pr:Example/repo#7", "--shared", "--json");
+  strictEqual(h.exitCode, 0, h.stderr);
+  deepStrictEqual([JSON.parse(h.stdout).schema, JSON.parse(h.stdout).result], ["bb-bus.heartbeat.v1", "held"]);
+  fakeRelay({ contend: true }).claims.push({ resource: "pr:example/repo#7", spelled: "pr:Example/repo#7", holder_thread: ME,
+    holder_server: "alpha", reason: "X-1", claimed: "t", expires: "2999-01-01T00:00:00Z", pickup: 0, waiters: [] });
+  const c = await run("heartbeat", "pr:Example/repo#7", "--shared", "--json");
+  strictEqual(c.exitCode, 75);
+  const j = JSON.parse(c.stdout);
+  deepStrictEqual([j.schema, j.result, j.claim.holder_thread, j.error], ["bb-bus.heartbeat.v1", "contended", ME, "somebody waits; not renewed"]);
+  match(c.stderr, /somebody waits/);
+  strictEqual((await run("heartbeat", "pr:Example/repo#7", "--shared")).stdout ?? "", "");
 });

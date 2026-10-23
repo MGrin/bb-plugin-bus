@@ -24,6 +24,10 @@ import { fmtShared, renderShared } from "./src/shared/render.ts";
 
 /** rc 75: somebody holds it. rc 69: the relay could not be asked — a different answer (MX-1528). */
 const RC_BUSY = 75;
+/** `lease` could not ask the relay (MX-1536): blind, never a cached answer. */
+const RC_BLIND = 2;
+/** Past every message id, so a sync returns claims and consumes no message. */
+const LEASE_AFTER = Number.MAX_SAFE_INTEGER;
 const RC_UNREACHABLE = 69;
 
 /**
@@ -375,6 +379,32 @@ export default async function plugin(bb: BbPluginApi) {
         }
       }
 
+      // `lease` (MX-1536): a fresh, authoritative, NON-RENEWING read of one shared claim. Before the
+      // thread gate and with no markRead: it writes nothing here. It asks the relay's sync with an
+      // `after` past every message id, so no message is returned, delivered or consumed, and it never
+      // touches the sync cursor or shared.db. It never falls back to the cache: rc 2 means BLIND.
+      if (cmd === "lease") {
+        const blind = (why: string) => ({ exitCode: RC_BLIND, stderr: `bus: lease is blind — ${why}` });
+        const largs = argv.slice(1).filter((a) => !a.startsWith("--"));
+        if (!argv.includes("--shared") || !largs[0]) return fail("usage: bb bus lease <resource> --shared [--json]");
+        const lk = claimKey(largs[0], ctx.cwd ?? null);
+        if ("error" in lk) return fail(lk.error);
+        if (largs[0].startsWith("path:")) return fail("bus: a path: claim cannot be shared, so there is no shared lease to read.");
+        const cfg = await sharedCfg();
+        if (!cfg) return blind("the shared space is not configured on this server");
+        let res;
+        try { res = await cfg.client.sync(LEASE_AFTER); } catch (e) { return blind(say(e)); }
+        const nowMs = Date.parse(res?.now ?? "");
+        if (typeof res?.relay !== "string" || !Array.isArray(res.claims) || Number.isNaN(nowMs)) {
+          return blind(`the relay at ${cfg.url} answered, but not with a sync receipt`);
+        }
+        const claim = res.claims.find((c) => c.resource === lk.key) ?? null;
+        // An unexpired view is the holder; one past the relay's own clock is listed but no longer held.
+        const held = claim !== null && nowMs < Date.parse(claim.expires);
+        return { exitCode: 0, stdout: JSON.stringify({ schema: "bb-bus.lease.v1", relay: res.relay, relay_now: res.now,
+          fetched_at: nowIso(), server: cfg.server, resource: largs[0], key: lk.key, held, claim }) };
+      }
+
       if (!me && cmd !== "help") {
         return fail("bus: no thread context — run from inside a bb thread");
       }
@@ -545,7 +575,7 @@ export default async function plugin(bb: BbPluginApi) {
           }
 
           case "heartbeat": {
-            const hargs = argv.filter((a) => a !== "--shared");
+            const hargs = argv.filter((a) => a !== "--shared" && a !== "--json");
             const resource = hargs[1];
             if (!resource) return fail("usage: bb bus heartbeat <resource> [--shared]");
             const hk = claimKey(resource, ctx.cwd ?? null);
@@ -556,11 +586,15 @@ export default async function plugin(bb: BbPluginApi) {
               let r;
               try { r = await cfg.client.heartbeat(mine, hk.key); } catch (e) { markRead(); return relayFail(e, "the shared claim was NOT extended"); }
               markRead();
+              const asJson = argv.includes("--json");
+              const receipt = (result: string, error: string | null) => JSON.stringify(
+                { schema: "bb-bus.heartbeat.v1", result, claim: r.claim, error });
               if (r.result === "held") {
                 shared.upsertClaim(r.claim);
-                return { exitCode: 0, stdout: `held ${resource} (shared) until ${r.claim.expires}` };
+                return { exitCode: 0, stdout: asJson ? receipt("held", null) : `held ${resource} (shared) until ${r.claim.expires}` };
               }
-              return { exitCode: RC_BUSY, stderr: `bus: ${"error" in r ? r.error : r.result}` };
+              const why = "error" in r ? r.error : r.result;
+              return { exitCode: RC_BUSY, ...(asJson ? { stdout: receipt(r.result, why) } : {}), stderr: `bus: ${why}` };
             }
             await sweep(mine);
             const existing = store.getClaim(hk.key);
@@ -855,7 +889,7 @@ function helpText(): string {
   return [
     "bb bus — typed peer bus between bb threads. One stream, no rooms.",
     "",
-    "  claim <resource> --reason <r> [--ttl 30m] [--wait [--max-wait 2h]] [--shared] · heartbeat <r> [--shared] · release <r> [--force --reason '<why>'] [--shared] · claims [--stale] [--mine]",
+    "  claim <resource> --reason <r> [--ttl 30m] [--wait [--max-wait 2h]] [--shared] · heartbeat <r> [--shared] [--json] · lease <r> --shared --json · release <r> [--force --reason '<why>'] [--shared] · claims [--stale] [--mine]",
     "  log [--kind K] [--ref R] [--from T] [--to T] [--since <ts>] [--unread] [-n N] · unanswered [--minutes N] · build",
     "  shared space across servers: join --description '<one line>' · leave · peers · --to <thread-id>@<server> · --ack-of x<n>",
     "",

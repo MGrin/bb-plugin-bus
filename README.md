@@ -16,9 +16,10 @@ bb plugin install git:https://github.com/MGrin/bb-plugin-bus.git@main
 bb bus send --kind <kind> --to <thread-id> [--ref <ref>] [--field k=v]… [--body-file <p>]
 bb bus <kind> --to <thread-id> …                 # one verb per kind; same validation
 bb bus claim <resource> --reason <r> [--ttl 30m] [--wait [--max-wait 2h]] # held / busy / waiting (rc 75)
-bb bus heartbeat <resource> · release <resource> [--force --reason '<why>'] · claims [--stale] [--mine]
+bb bus heartbeat <resource> [--shared] [--json] · release <resource> [--force --reason '<why>'] · claims [--stale] [--mine]
 bb bus log [--kind K] [--ref R] [--from T] [--to T] [--since <ts>] [--unread] [-n N]
 bb bus unanswered [--minutes N] · build
+bb bus lease <resource> --shared --json          # fresh, non-renewing read of a shared claim (rc 0 / 2)
 bb bus join --description '<one line>' · leave · peers   # the shared space across servers
 bb bus send … --to <thread-id>@<server> · ack --ack-of x<n> · claim … --shared
 ```
@@ -140,6 +141,25 @@ waiting it arms nothing.
 holder's own re-claim are refused at rc 75, naming the waiters, so a contended claim lasts
 the ttl its holder asked for; the 3-hour idle hold on 2026-10-02 was a renewed one. The one
 exception is a granted waiter confirming its pickup. With nobody waiting, nothing changed.
+
+**Reading a shared claim without touching it** (MX-1536). `bb bus lease <resource> --shared --json`
+asks the relay's sync with an `after` past every message id, so it returns claims and
+delivers or consumes no message; it renews nothing, never moves the sync cursor and never
+writes `shared.db`. It never answers from the cache. One JSON object on stdout:
+
+```json
+{"schema":"bb-bus.lease.v1","relay":"<relay id>","relay_now":"<relay ISO time>",
+ "fetched_at":"<local ISO time>","server":"<this server>","resource":"<as asked>",
+ "key":"<claim key>","held":true,"claim":{"resource":"…","spelled":"…","holder_thread":"…",
+ "holder_server":"…","reason":"…","claimed":"…","expires":"…","pickup":0,"waiters":[]}}
+```
+
+`held` is true when the relay lists the claim and its `expires` is after `relay_now`. A claim
+listed past `expires` reads `held:false` with the view kept; no claim reads `held:false,
+claim:null`. **Exit 0** = the relay answered (held or not). **Exit 2** = blind: relay down,
+not configured, or not a sync answer; the reason is on stderr and stdout is empty. Usage
+errors are rc 1. `heartbeat --shared --json` prints `{"schema":"bb-bus.heartbeat.v1",
+"result":"held"|"contended","claim":…,"error":…}`; contended stays rc 75 and keeps the claim.
 
 Enforcement is SPECIFIED AND NOT YET DEPLOYED, and the difference is the whole point of
 saying so here. `bus_claim_required` reads this store read-only and refuses `gh pr merge
